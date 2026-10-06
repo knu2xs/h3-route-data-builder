@@ -5,14 +5,26 @@ site_dir: ../docs
 
 nav:
   - Home: index.md
+  - Design:
+      - Product Vision: design/00-product-vision.md
+      - Shared Constitution: design/01-shared-constitution.md
+      - System Architecture: design/02-system-architecture.md
+      - Data Contract: design/03-data-contract.md
+      - Test Strategy: design/09-test-strategy.md
+      - Roadmap: design/10-roadmap.md
+      - Builder Features:
+          - AOI Cell Generation and Snapping: design/builder/001-aoi-cell-generation-and-snapping.md
+          - Candidate Generation: design/builder/002-candidate-generation.md
+          - Resumable OD Solving: design/builder/003-resumable-od-solving.md
+          - GeoParquet Publication: design/builder/004-geoparquet-publication.md
+          - Parallel Execution: design/builder/005-parallel-execution.md
   - Configuration: configuration.md
   - API: api.md
   - Cookiecutter Reference: cookiecutter_reference.md
 
 
-# add a GitHub repo link to the top navigation bar
-# repo_url: https://github.com/<github_organization>/<github_project_name>
-# repo_name: <project_name>
+repo_url: https://github.com/knu2xs/h3-route-data-builder
+repo_name: h3-route-data-builder
 
 
 theme:

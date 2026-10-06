@@ -61,6 +61,19 @@ When working in this project:
 - Tests live in `testing/` and follow the naming convention `test_*.py`
 - Configuration is loaded from `config/config.yml`; secrets belong in `config/secrets.yml` (gitignored)
 
+### Spec-Driven Development
+
+- This project is governed by [.specify/memory/constitution.md](.specify/memory/constitution.md).
+  It supersedes this file where they conflict; read it before planning or implementing a feature.
+- Features are built with Spec Kit skills: `/speckit-specify` -> `/speckit-clarify` ->
+  `/speckit-plan` -> `/speckit-tasks` -> `/speckit-analyze` -> `/speckit-implement`.
+  Feature artifacts live in `specs/NNN-feature-name/`.
+- Design inputs (vision, architecture, data contract, roadmap, feature drafts) are in
+  `docsrc/mkdocs/design/`. The data contract is shared with the ArcPy-free
+  [h3-route-solver](https://github.com/knu2xs/h3-route-solver); do not change it unilaterally.
+- Keep ArcPy usage inside network/geoprocessing modules. H3 math, planning, ledger, manifest,
+  and validation code must import and test without ArcPy.
+
 ---
 
 ## Coding Standards and Conventions
