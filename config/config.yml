@@ -1,0 +1,73 @@
+# =============================================================================
+# Project Configuration - h3-route-data-builder
+# =============================================================================
+# This is the main configuration file for the project. Modify values here
+# to control project behavior without changing source code.
+#
+# Secrets (credentials, API keys) should go in secrets.yml, NOT here.
+# Copy secrets_template.yml to secrets.yml and fill in your values.
+#
+# Environment-specific settings live under the environments key.
+# Active environment precedence is:
+# 1) ENVIRONMENT environment variable
+# 2) top-level environment key in this file
+# 3) invocation parameter in config loader calls
+# =============================================================================
+
+project:
+  name: "h3-route-data-builder"
+  title: "H3 Route Data Builder"
+  description: "ArcPy pipeline that builds sparse, resumable H3 origin-destination network cost datasets published as GeoParquet."
+
+# environment to use when ENVIRONMENT variable is not set (e.g., when running in an IDE)
+environment: dev
+
+# ---------------------------------------------------------------------------
+# Environment-specific settings
+# ---------------------------------------------------------------------------
+# The special "default" section provides fallback values for any key that is
+# not explicitly defined in a named environment (dev / test / prod).
+# Merge order: top-level keys → default → <active environment>.
+# Only add a key to a named environment when it must differ from the default.
+# ---------------------------------------------------------------------------
+environments:
+
+  default:
+
+    logging:
+      level: DEBUG
+
+    data:
+      input: "data/raw/input_data.csv"
+      output: "data/processed/processed.gdb/output_data"
+      log_dir: "reports/logs"
+
+    spatial:
+      default_crs: "EPSG:4326"  # CRS to use when not specified by data source
+      default_unit: "meters"    # Unit for distance calculations (e.g., "meters", "degrees")
+
+    esri:
+      gis_url: "https://prof-services.maps.arcgis.com"
+      gis_profile: "ps"
+
+  # ensure the key exists for each environment so it can be accessed from the Pythion config object
+  dev: {}
+
+  # example of overriding a default value for testing purposes - less verbose logging level
+  # to only surface warnings and errors during automated testing
+  test:
+    
+    logging:
+      level: INFO
+
+  # network file share for production assets and less verbose logging level
+  prod:
+
+    logging:
+      level: WARNING
+
+    data:
+      input: "//production/raw/input_data.csv"
+      output: "//production/processed/processed.gdb/output_data"
+      log_dir: "//production/reports/logs"
+    
