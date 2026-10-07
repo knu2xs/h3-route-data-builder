@@ -71,8 +71,10 @@ When working in this project:
 - Design inputs (vision, architecture, data contract, roadmap, feature drafts) are in
   `docsrc/mkdocs/design/`. The data contract is shared with the ArcPy-free
   [h3-route-solver](https://github.com/knu2xs/h3-route-solver); do not change it unilaterally.
-- Keep ArcPy usage inside network/geoprocessing modules. H3 math, planning, ledger, manifest,
-  and validation code must import and test without ArcPy.
+- Keep ArcPy usage inside network/geoprocessing modules. AOI, edge, and H3 polygon geometry
+  validation, reprojection, intersection, and representative geometry for eligibility use ArcPy.
+  H3 indexing/math, planning, ledger, manifest, deterministic non-spatial eligibility rules, and
+  non-spatial validation code must import and test without ArcPy.
 
 ---
 

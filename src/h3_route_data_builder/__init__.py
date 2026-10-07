@@ -7,8 +7,7 @@ __license__ = "Apache 2.0"
 __copyright__ = "Copyright 2026 by Joel McCune"
 
 # add specific imports below if you want to organize your code into modules, which is mostly what I do
-from . import config as config
+from . import config
 from . import utils
-from ._main import example_function, ExampleObject
 
-__all__ = ["config", "example_function", "ExampleObject", "utils"]
+__all__ = ["config", "utils"]

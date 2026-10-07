@@ -1,14 +1,14 @@
 <!--
 Sync Impact Report
-- Version change: (template) -> 1.0.0
-- Ratified from: h3-route-solver-specs/01-shared-constitution.md (shared principles I-X)
-  plus builder-specific principles XI-XV.
-- Added sections: Core Principles, Builder Principles, Technology Constraints,
-  Development Workflow & Quality Gates, Governance.
-- Templates reviewed: .specify/templates/plan-template.md (Constitution Check gate applies),
-  spec-template.md, tasks-template.md - no structural changes required.
-- Follow-up TODOs: resolve open clarifications listed in docsrc/mkdocs/design/10-roadmap.md
-  via /speckit-clarify before the first /speckit-plan.
+- Version change: 1.0.0 -> 1.1.0
+- Principle II is builder-specific: ArcPy geometry and reprojection are required in
+  network/geoprocessing modules; the H3 solver remains ArcPy-free.
+- Principles I and III-X remain shared in intent; principles II and XI-XV apply to this project.
+- Dependent guidance reviewed: AGENTS.md and the 001 geometry eligibility spec, plan, research,
+  and quickstart.
+- Migration impact: geometry/reprojection eligibility tests and operations require ArcGIS Pro;
+  H3 indexing and non-spatial state/validation remain portable.
+- The solver constitution is intentionally unchanged.
 -->
 
 # H3 Route Data Builder Constitution
@@ -17,9 +17,10 @@ The H3 Route Data Builder is the ArcGIS Pro / ArcPy half of a two-project system
 sparse, precomputed origin-destination (OD) network cost dataset over canonical H3 cells and
 publishes it as Parquet/GeoParquet for the ArcPy-free
 [h3-route-solver](https://github.com/knu2xs/h3-route-solver). Principles I-X are shared verbatim in
-intent with the solver; principles XI-XV apply to this project only.
+intent with the solver except Principle II, which is builder-specific; principles XI-XV also apply
+to this project only.
 
-## Core Principles (Shared)
+## Core Principles (Shared Except Where Noted)
 
 ### I. Explicit Semantics
 
@@ -34,13 +35,17 @@ conversion, speed, units, and tie-breaking.
 
 *Rationale:* the solver can only interpret data correctly if every assumption is declared.
 
-### II. ArcPy Isolation
+### II. Builder ArcPy Geometry Boundary
 
 Only the builder imports ArcPy. Within the builder, ArcPy usage MUST be confined to
-network/geoprocessing modules; H3 math, candidate planning, ledger, manifest, and validation
-logic MUST be importable and testable without ArcPy.
+network/geoprocessing modules. AOI geometry validation, geometry reprojection, edge/cell
+intersection, and representative geometry operations for eligibility MUST use ArcPy capabilities.
+Shapely and pyproj MUST NOT be used for those operations. H3 index calculations, deterministic
+non-spatial eligibility/state rules, candidate planning, ledger, manifest, and non-spatial
+validation logic MUST remain importable and testable without ArcPy.
 
-*Rationale:* keeps most logic portable, fast to test, and reusable by the solver contract.
+*Rationale:* uses ArcGIS geometry behavior consistently for this builder's spatial operations
+while preserving the ArcPy-free H3 solver and portable non-spatial builder logic.
 
 ### III. Sparse Correctness (NON-NEGOTIABLE)
 
@@ -162,7 +167,8 @@ visible to readers.
 - Every plan MUST pass a Constitution Check against principles I-XV before research and again
   after design; violations require a recorded justification in the plan's Complexity Tracking.
 - Tests are written with or before implementation; `make test` MUST pass before merge.
-- Unit tests MUST NOT require ArcPy; ArcPy-dependent tests are marked and skipped when ArcPy is
+- Unit tests for H3 indexing, state, ledger, manifest, and other non-spatial logic MUST NOT require
+  ArcPy. ArcPy-dependent geometry and network tests MUST be marked and skipped when ArcPy is
   unavailable.
 - Code follows `AGENTS.md` conventions (black, type hints, Google docstrings, `pathlib`,
   module-level loggers).
@@ -171,12 +177,14 @@ visible to readers.
 
 - This constitution supersedes other practice documents; `AGENTS.md` provides runtime coding
   guidance subordinate to it.
-- Principles I-X are shared with `h3-route-solver`. Amending a shared principle MUST be mirrored
-  in the solver constitution in the same release cycle.
+- Principles I and III-X are shared in intent with `h3-route-solver`; Principle II and principles
+  XI-XV are builder-specific. Builder-specific amendments do not change the solver constitution.
+  Changes to the shared principles MUST be mirrored in the solver constitution in the same release
+  cycle.
 - Amendments require a pull request describing the change, rationale, and migration impact, and
   updating dependent templates and docs.
 - Versioning: MAJOR for removed/redefined principles, MINOR for added principles or materially
   expanded guidance, PATCH for clarifications.
 - Reviews MUST verify compliance; unjustified complexity is rejected.
 
-**Version**: 1.0.0 | **Ratified**: 2026-10-06 | **Last Amended**: 2026-10-06
+**Version**: 1.1.0 | **Ratified**: 2026-10-06 | **Last Amended**: 2026-10-06

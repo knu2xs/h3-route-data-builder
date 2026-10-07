@@ -8,8 +8,10 @@ __license__ = "Apache 2.0"
 import importlib.util
 from pathlib import Path
 import sys
+from typing import Any
 
 import arcpy
+import json
 
 
 def find_pkg_source(package_name) -> Path:
@@ -38,7 +40,11 @@ if importlib.util.find_spec("h3_route_data_builder") is None:
 # include custom code
 import h3_route_data_builder
 from h3_route_data_builder.utils import get_logger
+from h3_route_data_builder.config import ConfigNode, config
+from h3_route_data_builder.network.workflow import run_geometry_eligibility
 
+# initialize logger for the toolbox
+logger = get_logger("h3_route_data_builder", level="INFO", add_arcpy_handler=True)
 
 class Toolbox:
     def __init__(self):
@@ -48,121 +54,238 @@ class Toolbox:
 
         # List of tool classes associated with this toolbox
         self.tools = [
-            ExampleTool,
-            ExampleToolInToolset,
+            GeometryEligibilityTool,
         ]
 
 
-class ExampleTool:
-    def __init__(self):
-        self.label = "Example Tool"
-        self.description = (
-            "Create data directory structure for processing data."
-        )
-        self.category = "Utilities"  # creates toolset named "Utilities"
+class GeometryEligibilityTool:
+    """Create an auditable H3 eligibility dataset without generating OD pairs."""
 
-        # configure logging
-        logger_name = f"h3_route_data_builder.Toolbox.{self.__class__.__name__}"
-        self.logger = get_logger(logger_name, level="INFO", add_arcpy_handler=True)
-
-    def getParameterInfo(self):
-        """Define parameter definitions"""
-
-        features = arcpy.Parameter(
-            displayName="Input Features",
-            name="features",
-            datatype="GPFeatureLayer",  # use this data type to include both feature classes and feature layers in ArcGIS Pro
-            parameterType="Required",
-            direction="Input"
+    def __init__(self) -> None:
+        self.label = "Build H3 Geometry Eligibility"
+        self.description = "Validate an AOI and create reconciled H3 cell eligibility results from a network dataset."
+        self.category = "H3 Route Data Builder"
+        self.logger = get_logger(
+            f"h3_route_data_builder.Toolbox.{self.__class__.__name__}",
+            level="INFO",
+            add_arcpy_handler=False
         )
 
-        params = [features]
-
-        return params
-
-    def execute(self, parameters, messages):
-        """The source code of the tool."""
-
-        # retrieve the data directory path from parameters
-        dir_data = parameters[0].value
-
-        # log some messages
-        self.logger.info(f"Processing input features: {dir_data}")
-
-        return
-
-class ExampleToolInToolset:
-    def __init__(self):
-        self.label = "Example Tool in Toolset"
-        self.description = (
-            "An example tool within a toolset."
-        )
-        self.category = "Example Toolset"  # creates toolset named "Example Toolset"
-
-        # configure logging
-        logger_name = f"h3_route_data_builder.Toolbox.{self.__class__.__name__}"
-        self.logger = get_logger(logger_name, level="INFO", add_arcpy_handler=True)
-
-    def getParameterInfo(self):
-        """Define parameter definitions"""
-
-        features = arcpy.Parameter(
-            displayName="Input Features",
-            name="input_features",
+    def getParameterInfo(self) -> list[arcpy.Parameter]:
+        """Define AOI, network, CRS, and bounded-run parameters."""
+        aoi = arcpy.Parameter(
+            displayName="Area of Interest",
+            name="aoi",
             datatype="GPFeatureLayer",
             parameterType="Required",
-            direction="Input"
+            direction="Input",
         )
+        aoi.filter.list = ["Polygon"]
 
-        attribute_field = arcpy.Parameter(
-            displayName="Attribute Field",
-            name="attribute_field",
+        network = arcpy.Parameter(
+            displayName="Network Dataset",
+            name="network_dataset",
+            datatype="DENetworkDataset",
+            parameterType="Required",
+            direction="Input",
+        )
+        output = arcpy.Parameter(
+            displayName="Eligibility Output Folder",
+            name="output_folder",
+            datatype="DEFolder",
+            parameterType="Required",
+            direction="Input",
+        )
+        working_crs = arcpy.Parameter(
+            displayName="Working Projected Coordinate System",
+            name="working_crs",
+            datatype="GPCoordinateSystem",
+            parameterType="Required",
+            direction="Input",
+        )
+        storage_crs = arcpy.Parameter(
+            displayName="GeoParquet Storage Coordinate System",
+            name="storage_crs",
+            datatype="GPCoordinateSystem",
+            parameterType="Required",
+            direction="Input",
+        )
+        storage_crs.value = arcpy.SpatialReference("GCS_WGS_1984")
+
+        h3_resolution = arcpy.Parameter(
+            displayName="H3 Resolution",
+            name="h3_resolution",
+            datatype="GPLong",
+            parameterType="Required",
+            direction="Input",
+        )
+        h3_resolution.filter.type = "Range"
+        h3_resolution.filter.list = [0, 15]
+
+        travel_mode = arcpy.Parameter(
+            displayName="Travel Mode",
+            name="travel_mode",
             datatype="GPString",
             parameterType="Required",
-            direction="Input"
+            direction="Input",
         )
-        attribute_field.filter.type = "ValueList"
+        travel_mode.filter.type = "ValueList"
 
-        params = [features, attribute_field]
+        snap_tolerance = arcpy.Parameter(
+            displayName="Representative Snap Tolerance (meters)",
+            name="snap_tolerance_m",
+            datatype="GPDouble",
+            parameterType="Required",
+            direction="Input",
+        )
+        batch_size = arcpy.Parameter(
+            displayName="Input Batch Size",
+            name="batch_size",
+            datatype="GPLong",
+            parameterType="Required",
+            direction="Input",
+        )
+        part_limit = arcpy.Parameter(
+            displayName="Staged Part Row Limit",
+            name="part_row_limit",
+            datatype="GPLong",
+            parameterType="Required",
+            direction="Input",
+        )
+        output_cap = arcpy.Parameter(
+            displayName="Total Solvable Cell Hard Cap",
+            name="total_output_hard_cap",
+            datatype="GPLong",
+            parameterType="Required",
+            direction="Input",
+        )
+        datum_transformation = arcpy.Parameter(
+            displayName="Datum Transformation",
+            name="datum_transformation",
+            datatype="GPString",
+            parameterType="Optional",
+            direction="Input",
+        )
 
-        return params
-    
-    def updateParameters(self, parameters):
-        """Modify the values and properties of parameters before internal validation is performed.
-        
-        This method is called whenever a parameter has been changed.
-        """
-        # get the parameters for easier access
-        features, attribute_field = parameters
+        return [
+            aoi,
+            network,
+            output,
+            working_crs,
+            storage_crs,
+            h3_resolution,
+            travel_mode,
+            snap_tolerance,
+            batch_size,
+            part_limit,
+            output_cap,
+            datum_transformation,
+        ]
 
-        # populate attribute field choices based on input features
-        if features.altered and features.value:
-            desc = arcpy.Describe(features.valueAsText)
-            fields = desc.fields
-            field_names = [field.name for field in fields]
-            attribute_field.filter.list = field_names
-        elif not features.value:
-            attribute_field.filter.list = []
+    def isLicensed(self) -> bool:
+        """Require the Network Analyst extension to be licensed."""
+        return arcpy.CheckExtension("Network") in {"Available", "CheckedOut"}
 
-    def execute(self, parameters, messages):
-        """The source code of the tool."""
+    def updateParameters(self, parameters: list[arcpy.Parameter]) -> None:
+        """Populate travel-mode choices from the selected network dataset."""
+        network, travel_mode = parameters[1], parameters[6]
+        if network.valueAsText and network.altered:
+            try:
+                modes = arcpy.na.GetTravelModes(network.valueAsText)
+                travel_mode.filter.list = sorted(modes)
+                default_mode = arcpy.Describe(network.valueAsText).defaultTravelModeName
+                if default_mode in modes and not travel_mode.altered:
+                    travel_mode.value = default_mode
+            except Exception as exc:
+                self.logger.warning(f"Could not load network travel modes: {exc}")
 
-        # retrieve the data directory path from parameters
-        features = parameters[0].value
-        attribute_field = parameters[1].value
+    def updateMessages(self, parameters: list[arcpy.Parameter]) -> None:
+        """Validate input layer shape and configured positive processing values."""
+        aoi, network = parameters[0], parameters[1]
+        if aoi.valueAsText:
+            try:
+                if arcpy.Describe(aoi.valueAsText).shapeType.casefold() != "polygon":
+                    aoi.setErrorMessage("Area of Interest must be polygon geometry.")
+            except Exception as exc:
+                aoi.setErrorMessage(f"Could not inspect AOI: {exc}")
+        if network.valueAsText:
+            try:
+                if arcpy.Describe(network.valueAsText).dataType != "NetworkDataset":
+                    network.setErrorMessage("Input must be a Network Dataset.")
+            except Exception as exc:
+                network.setErrorMessage(f"Could not inspect network dataset: {exc}")
+        for parameter_index in (8, 9, 10):
+            parameter = parameters[parameter_index]
+            if parameter.value is not None and int(parameter.value) <= 0:
+                parameter.setErrorMessage("Value must be a positive integer.")
+        if parameters[7].value is not None and float(parameters[7].value) < 0:
+            parameters[7].setErrorMessage("Snap tolerance must be non-negative.")
 
-        # describe input features
-        desc = arcpy.Describe(features)
+    def execute(self, parameters: list[arcpy.Parameter], messages: Any) -> None:
+        """Validate, run the eligibility workflow, and report the result location."""
+        (
+            aoi,
+            network,
+            output,
+            working_crs,
+            storage_crs,
+            h3_resolution,
+            travel_mode,
+            snap_tolerance,
+            batch_size,
+            part_limit,
+            output_cap,
+            datum_transformation,
+        ) = parameters
+        network_path = network.valueAsText
+        travel_modes = arcpy.na.GetTravelModes(network_path)
+        if travel_mode.valueAsText not in travel_modes:
+            raise ValueError(
+                f"Travel mode '{travel_mode.valueAsText}' is unavailable in the network"
+            )
 
-        # if the input features are a feature layer, get the underlying data source
-        if desc.dataType == "FeatureLayer":
-            src = desc.dataSource
-            name = desc.name
-        else:
-            src = features
-            name = Path(src).stem
+        resolved_config = config.to_dict()
+        resolved_config["spatial"].update(
+            {
+                "working_crs": _spatial_reference_text(working_crs.value),
+                "storage_crs": _spatial_reference_text(storage_crs.value),
+                "h3_resolution": int(h3_resolution.value),
+                "intersection_policy": "inclusive",
+                "representative_snap_tolerance_m": float(snap_tolerance.value),
+                "datum_transformation": datum_transformation.valueAsText or None,
+            }
+        )
+        resolved_config["network"].update(
+            {
+                "travel_mode": travel_mode.valueAsText,
+                "restrictions": json.loads(str(travel_modes[travel_mode.valueAsText]))[
+                    "restrictionAttributeNames"
+                ],
+            }
+        )
+        resolved_config["eligibility"].update(
+            {
+                "batch_size": int(batch_size.value),
+                "part_row_limit": int(part_limit.value),
+                "total_output_hard_cap": int(output_cap.value),
+            }
+        )
+        summary = run_geometry_eligibility(
+            aoi.valueAsText,
+            network_path,
+            output.valueAsText,
+            ConfigNode(resolved_config),
+        )
+        self.logger.info(
+            "Eligibility run %s completed with %s solvable cells; output: %s",
+            summary.run_id,
+            summary.solvable_cell_count,
+            summary.run_directory,
+        )
 
-        # log some messages
-        self.logger.info(f"Processing input features, '{name}', from {src} using attribute field, '{attribute_field}'")
 
-        return
+def _spatial_reference_text(spatial_reference: arcpy.SpatialReference) -> str:
+    """Return a canonical spatial-reference WKT string from a toolbox parameter."""
+    if spatial_reference is None or spatial_reference.name == "Unknown":
+        raise ValueError("A known spatial reference is required")
+    return spatial_reference.exportToString()

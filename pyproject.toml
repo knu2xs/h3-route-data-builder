@@ -27,13 +27,7 @@ license = {text = "Apache-2.0"}
 
 
 dependencies = [
-    "arcgis>=2.2.0",
-    "duckdb>=1.0",
     "h3>=4.0",
-    "numpy>=1.7",
-    "pandas>=1.0.5",
-    "pyarrow>=14.0",
-    "pyyaml>=6.0",
     # "arcpy-parquet @ git+https://github.com/knu2xs/arcpy-parquet.git",
     
 ]
