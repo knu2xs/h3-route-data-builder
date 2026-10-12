@@ -12,7 +12,6 @@ def make_fingerprint(**overrides: object) -> str:
         "network_fingerprint": "network-1",
         "travel_mode": "Driving Time",
         "restrictions": ["OneWay", "PrivateRoad"],
-        "working_crs": "local-projected-crs",
         "h3_resolution": 9,
         "eligibility_policy": {
             "intersection": "inclusive",

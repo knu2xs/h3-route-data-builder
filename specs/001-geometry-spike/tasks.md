@@ -12,7 +12,9 @@
 
 **Purpose**: Establish feature configuration, package boundaries, and test-environment gates.
 
-- [X] T001 [P] Add explicit spatial, network, and eligibility configuration keys in `config/config.yml`, including working/storage CRS, snap tolerance, H3 resolution, travel mode/restrictions, inclusive intersection policy, batch size, per-part row limit, and required total solvable-cell hard cap; reject missing required values instead of adding implicit code defaults.
+- [X] T001 [P] Add network and eligibility configuration keys in `config/config.yml`, including
+	snap tolerance, H3 resolution, travel mode/restrictions, inclusive intersection policy, batch
+	size, per-part row limit, and fixed spatial policy; keep CRS data-derived/fixed.
 - [X] T002 [P] Add ArcPy-test skip helpers and a `H3_RDB_TEST_NETWORK` environment-variable fixture that checks dataset availability with `arcpy.Exists` in `testing/conftest.py`.
 - [X] T003 [P] Create the package initializers `src/h3_route_data_builder/eligibility/__init__.py` and `src/h3_route_data_builder/network/__init__.py`.
 
@@ -46,9 +48,14 @@
 ### Implementation for User Story 1
 
 - [X] T011 [US1] Inspect ArcPy network-source/edge evaluator behavior for configured travel modes and restrictions; add synthetic tests for allowed, restricted, one-way, and unknown evaluator cases in `testing/test_network_eligibility.py`, and record the supported evaluator mapping and limitations in `specs/001-geometry-spike/research.md`.
-- [X] T012 [P] [US1] Implement AOI validation, explicit ArcPy projection to the configured working CRS, datum transformation handling, AOI clipping, multipart traversal, and exact point/line intersection checks in `src/h3_route_data_builder/network/geometry.py`; use ArcPy intersection dimensions 1 and 2 so point touches and line overlaps both qualify.
+- [X] T012 [P] [US1] Implement AOI validation, ArcPy projection to WGS 84 / EPSG:4326 with
+	best-available datum transformation selection, AOI clipping, multipart traversal, and exact
+	point/line intersections in `src/h3_route_data_builder/network/geometry.py`.
 - [X] T013 [US1] Implement network edge-source extraction and eligibility using the supported evaluator mapping established in T011 in `src/h3_route_data_builder/network/eligibility.py`; exclude prohibited or indeterminate edges with a recorded reason.
-- [X] T014 [US1] Implement sorted/deduplicated H3 v4 AOI candidate coverage in `src/h3_route_data_builder/eligibility/cells.py` and construct/project canonical H3 cell polygons through `src/h3_route_data_builder/network/geometry.py`; use exact ArcPy topology as the eligibility predicate, not the candidate cover.
+- [X] T014 [US1] Implement sorted/deduplicated H3 v4 AOI candidate coverage in
+	`src/h3_route_data_builder/eligibility/cells.py` and construct canonical WGS84 H3 cell polygons
+	through `src/h3_route_data_builder/network/geometry.py`; use exact ArcPy topology as the
+	eligibility predicate, not the candidate cover.
 - [X] T015 [US1] Implement per-cell intersection classification and edge evidence assembly in `src/h3_route_data_builder/eligibility/engine.py`; do not mark a row `solvable` until Story 2 validates its representative and Network Analyst fields.
 - [X] T016 [US1] Add deterministic batch split/retry, staging-part row-limit, and no-truncation tests in `testing/test_eligibility_staging.py`.
 - [X] T017 [US1] Implement deterministic bounded input partitioning and batch subdivision/retry in `src/h3_route_data_builder/eligibility/staging.py`; write each batch to its own atomic part and never drop rows at the per-part limit.
@@ -77,7 +84,7 @@
 - [X] T024 [US2] Implement nearest-point representative selection on eligible in-AOI edge portions in `src/h3_route_data_builder/network/representatives.py`; rank by centroid distance, then source ID, source OID, and edge measure, independent of input order.
 - [X] T025 [US2] Implement `arcpy.na.CalculateLocations` integration and validate `SourceID`, `SourceOID`, `PosAlong`, and `SideOfEdge` against the intended eligible edge in `src/h3_route_data_builder/network/locations.py`; reject a mismatched location and try the next deterministically ranked edge candidate.
 - [X] T026 [US2] Persist representative geometry, snap distance, location fields, eligibility reason, CRS/travel-mode/restriction policy, and fingerprint evidence in `src/h3_route_data_builder/eligibility/engine.py`; rows without a valid representative remain `ineligible`.
-- [X] T027 [US2] Enforce the required total hard cap against distinct validated solvable H3 IDs and implement the final `eligibility_status=solvable` handoff/completion gate in `src/h3_route_data_builder/eligibility/reconcile.py`; fail explicitly and keep the run incomplete on cap overflow or unreconciled partitions.
+- [X] T027 [US2] Enforce the resolved total hard cap against distinct validated solvable H3 IDs and implement the final `eligibility_status=solvable` handoff/completion gate in `src/h3_route_data_builder/eligibility/reconcile.py`; fail explicitly and keep the run incomplete on cap overflow or unreconciled partitions.
 
 **Checkpoint**: Only cells with an eligible intersecting edge, one deterministic representative, valid location fields, and reconciled run evidence are exposed as solvable.
 
@@ -87,6 +94,51 @@
 
 - [X] T028 Add structured progress, exclusion-reason, partition-reconciliation, and run-completion logging with `get_logger` in `src/h3_route_data_builder/eligibility/` and `src/h3_route_data_builder/network/` modules.
 - [X] T029 Run the portable checks, ArcPy synthetic suites, path-gated real-data test, and `make test` following `specs/001-geometry-spike/quickstart.md`; update the guide only if the implemented commands or expected outcomes differ.
+
+---
+
+## Phase 6: CRS Contract Refinement
+
+**Purpose**: Keep caller controls out of the spatial-reference contract while making the fixed
+output CRS and automatic datum transformation behavior explicit and verifiable.
+
+- [X] T030 Remove CRS and datum-transformation controls from toolbox/API surfaces; reject spatial
+	inputs with unknown CRS.
+- [X] T031 Remove configurable storage CRS and datum-transformation keys; project persisted
+	geometries to WGS 84 / EPSG:4326 and record that fixed CRS in run evidence.
+- [X] T032 Select the first extent-ranked ArcPy `ListTransformations` result, log it, and fail when
+	no required transformation is available; test selection and failure.
+- [X] T033 Add complete WGS 84 / EPSG:4326 PROJJSON to every GeoParquet geometry column and test its
+	CRS identifier.
+- [X] T034 Update the feature spec, plan, research, data model, output contract, quickstart, and
+	configuration documentation to match the CRS and transformation behavior.
+- [X] T035 Remove the configured working CRS and all projected-analysis CRS plumbing; transform AOI
+	and network geometry to WGS 84 / EPSG:4326 and construct H3 polygons directly in WGS84.
+- [X] T036 Use geodesic meter distances for representative ranking and snap tolerance, and verify
+	GeoParquet serialization writes already-WGS84 geometry without redundant projection.
+- [X] T037 Update the existing Spec Kit artifacts to make WGS84-only processing and geodesic meter
+	measurements the authoritative contract.
+
+---
+
+## Phase 7: Resource-Aware Execution Limits
+
+**Purpose**: Make capacity limits optional to callers while preserving bounded execution,
+operator overrides, provenance, and deterministic resume.
+
+- [X] T038 Add a shared tested resolver for batch size, staged-part row limit, and total cap using
+	available memory, output-volume free space, and candidate count; version the formula policy.
+- [X] T039 Remove capacity values from required project configuration and expose optional
+	keyword-only workflow API overrides; resolve all omitted values before partitioning.
+- [X] T040 Log each effective value and source, persist limits/provenance/policy/resource snapshot
+	in the manifest and behavior fingerprint, restore on resume, and retain fail-incomplete hard-cap
+	behavior.
+- [X] T041 Make the three Pro parameters optional, populate inferred suggestions, preserve operator
+	overrides, and test values/provenance passed by the toolbox.
+- [X] T042 Populate the Pro tool XML metadata with the complete parameter and inference-policy help;
+	test the sidecar metadata against the declared toolbox parameters.
+- [ ] T043 Open the tool in ArcGIS Pro and verify the populated Help text and inferred parameter
+	suggestions appear accurately in the Geoprocessing UI.
 
 ---
 

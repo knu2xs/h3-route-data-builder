@@ -11,11 +11,17 @@
 - **Inclusive intersection rule**: Test ArcPy intersections at both dimension `1` (point/multipoint) and dimension `2` (polyline); the cell qualifies if either result is nonempty. A single dimension would miss either point-only touches or line crossings/coincident boundaries. The synthetic ArcPy fixtures are the acceptance oracle.
 - **Alternatives considered**: Shapely for topology and pyproj for transformation; rejected by the clarified project requirement. Distance tolerance as a substitute for intersection; rejected because proximity must not qualify a cell.
 - **Dependency impact**: No package additions. ArcPy is provided by the ArcGIS Pro environment; Shapely and pyproj are not used for this feature's geometry or reprojection.
-- **CRS handling**: Reject missing input CRS. Project AOI, edges, and H3 cell geometries into configured `spatial.crs_working` with ArcPy; specify a datum transformation when the source and target datums require one. Record source/working CRS and transformation in run evidence.
+- **CRS handling**: Read input CRS only from AOI/network metadata and reject missing values.
+	Transform AOI and network edges directly to fixed WGS 84 / EPSG:4326 for geometry operations;
+	construct H3 polygons there. Measure representative ranking and snap distances geodesically in
+	meters. Declare complete PROJJSON in every GeoParquet geometry column. When datums differ, use the first
+	`arcpy.ListTransformations` result for the source extent (ranked by area overlap, then accuracy).
+	Log the selected transformation and fail if none is available. No datum-transformation setting
+	or caller parameter is accepted.
 
 ### H3 cell coverage
 
-- **Decision**: Generate a conservative H3 cell candidate superset for the AOI using the H3 v4 overlap-capable polygon coverage operation, using its `bbox_overlap` mode where supported. Construct canonical cell polygons from H3 boundary coordinates with ArcPy, project them into the working CRS, and use ArcPy geometry disjoint/intersection operations for the eligibility decision. Sort and deduplicate canonical H3 IDs before partitioning.
+- **Decision**: Generate a conservative H3 cell candidate superset for the AOI using the H3 v4 overlap-capable polygon coverage operation, using its `bbox_overlap` mode where supported. Construct canonical cell polygons from H3 boundary coordinates in WGS 84 / EPSG:4326 with ArcPy, and use ArcPy geometry disjoint/intersection operations for the eligibility decision. Sort and deduplicate canonical H3 IDs before partitioning.
 - **Rationale**: Center-contained polygon filling alone can miss cells that intersect only at a boundary. A deliberately broader cover is acceptable because it is not the eligibility predicate; exact topology removes false positives. Canonical IDs and geometry avoid assumptions that each cell has six neighbors.
 - **Alternatives considered**: Treat the H3 polygon fill result as final; rejected because containment is not equivalent to intersection. Use fixed six-neighbor expansion; rejected because pentagons invalidate that assumption. Use a Shapely predicate as the final decision; rejected by the clarified ArcPy-only spatial-operation requirement.
 - **Validation gate**: The implementation must prove the candidate cover contains every intersecting cell in synthetic crossing, point-touch, coincident-boundary, AOI-boundary, multipart, and pentagon-adjacent fixtures. If it misses any oracle cell, the cover strategy must change; the exact intersection rule must not be weakened.
@@ -32,8 +38,28 @@
 ### Deterministic batching and completion
 
 - **Decision**: Process stable input partition keys serially in stable order. Give each bounded batch a stable logical key and its own staged spatial part. If a part exceeds its row limit, deterministically subdivide the input batch and retry. Reconciliation deduplicates by canonical H3 ID, merges all eligible edge evidence, then selects one representative by centroid distance and source ID, source OID, and edge measure. Require a total hard cap and count it against unique solvable H3 IDs. Reconcile all expected input partitions and staged parts before setting run state to `complete`.
-- **Rationale**: This supports deterministic retries and idempotent staging, avoids truncation at per-part limits, and enforces constitution principles V, VII, IX, and XV. The required total hard cap is distinct from part sizing and leaves the run incomplete on overflow. Fingerprints also include schema and software versions as required by principle IV.
+- **Rationale**: This supports deterministic retries and idempotent staging, avoids truncation at per-part limits, and enforces constitution principles V, VII, IX, and XV. The resolved total hard cap is distinct from part sizing and leaves the run incomplete on overflow. Fingerprints also include schema and software versions as required by principle IV.
 - **Alternatives considered**: Drop rows when a part limit is reached; rejected because it silently loses eligible cells. Mark each successful part as a complete dataset; rejected because other input partitions may be missing.
+
+### Resource-aware execution limits
+
+- **Decision**: Make API and toolbox limit overrides optional. Infer a serial input batch size from
+	available physical memory (100 candidates per GiB, bounded to 100-2,000 and to candidate count),
+	a staged-part limit from memory (1,000 rows per 128 MiB, bounded to 500-50,000), and a total
+	solvable-cell cap from half the free bytes on the output volume at an estimated 8 KiB per cell,
+	bounded to 1-5,000,000. Version this policy and keep the formulas in one shared resolver.
+- **Provenance and resumption**: Log each resolved value and whether it was inferred or explicitly
+	set. Persist values, source, policy version, and the memory/free-disk snapshot in the manifest and
+	behavior fingerprint. Use caller overrides to identify a run; when they are omitted on resume,
+	load the saved values before deriving partition keys. Do not probe changing resource values again
+	for that run. A different explicit override does not resume the prior run.
+- **Rationale**: Memory controls serial batch and part sizing; disk space bounds the output cap.
+	The hard cap remains a fail-incomplete safety boundary, never permission to truncate. Explicit
+	overrides allow an operator to tune a run while inferred values eliminate machine-specific
+	setup requirements.
+- **Alternatives considered**: Make resource limits required config; rejected because capacity is
+	local to the executing machine. Re-infer on every retry; rejected because a resource change could
+	alter partitioning and break deterministic resumption.
 
 ### Staging representation
 

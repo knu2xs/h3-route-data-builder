@@ -1,6 +1,6 @@
 """Portable orchestration of geometry-stage cell evidence."""
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from typing import Any
 
 from .cells import canonical_h3_ids
@@ -22,6 +22,8 @@ def build_geometry_candidates(
     network_edges: Iterable[Any],
     aoi_geometry: Any,
     resolution: int,
+    *,
+    edge_classifier: Callable[[Any], Any] | None = None,
 ) -> list[CellGeometryCandidate]:
     """Build deterministic per-cell eligible-edge intersection evidence.
 
@@ -50,42 +52,77 @@ def build_geometry_candidates(
     canonical_geometries = {
         cell_id.lower(): geometry for cell_id, geometry in cell_geometries.items()
     }
-    eligible_edges = sorted(
-        (
-            edge
-            for edge in network_edges
-            if edge.decision.eligibility_status == "eligible"
-        ),
+    ordered_edges = sorted(
+        network_edges,
         key=lambda edge: (edge.source_id, edge.source_oid, edge.source_name),
     )
+    for cell_id in canonical_ids:
+        if cell_id not in canonical_geometries:
+            raise ValueError(f"Missing geometry for H3 cell {cell_id}")
+
+    spatial_pairs = _spatial_join_cell_edge_pairs(
+        canonical_ids,
+        canonical_geometries,
+        ordered_edges,
+    )
+    clipped_edges: dict[int, Any] = {}
+    geometric_matches: dict[str, list[tuple[int, Any]]] = {
+        cell_id: [] for cell_id in canonical_ids
+    }
+    intersecting_edge_indexes: set[int] = set()
+    for cell_index, edge_index in spatial_pairs:
+        cell_id = canonical_ids[cell_index]
+        edge = ordered_edges[edge_index]
+        if edge_index not in clipped_edges:
+            clipped_edges[edge_index] = clip_edge_to_aoi(
+                edge.geometry_working,
+                aoi_geometry,
+            )
+        in_aoi = clipped_edges[edge_index]
+        cell_geometry = canonical_geometries[cell_id]
+        matching_geometry = None
+        for geometry in (in_aoi.lines, in_aoi.points):
+            if geometry is None:
+                continue
+            cell_intersection = geometry_intersection(cell_geometry, geometry)
+            matching_geometry = cell_intersection.lines or cell_intersection.points
+            if matching_geometry is not None:
+                break
+        if matching_geometry is not None:
+            geometric_matches[cell_id].append((edge_index, matching_geometry))
+            intersecting_edge_indexes.add(edge_index)
+
+    decisions: dict[int, Any] = {}
+    for edge_index in sorted(intersecting_edge_indexes):
+        edge = ordered_edges[edge_index]
+        decision = edge.decision
+        if decision is None and edge_classifier is not None:
+            decision = edge_classifier(edge)
+        if decision is None:
+            raise ValueError(
+                "An edge classifier is required when network edge decisions are deferred"
+            )
+        decisions[edge_index] = decision
 
     candidates: list[CellGeometryCandidate] = []
     for cell_id in canonical_ids:
-        cell_geometry = canonical_geometries.get(cell_id)
-        if cell_geometry is None:
-            raise ValueError(f"Missing geometry for H3 cell {cell_id}")
+        cell_geometry = canonical_geometries[cell_id]
         intersections: list[EdgeIntersectionEvidence] = []
-        for edge in eligible_edges:
-            in_aoi = clip_edge_to_aoi(edge.geometry_working, aoi_geometry)
-            matching_geometry = None
-            for geometry in (in_aoi.lines, in_aoi.points):
-                if geometry is None:
-                    continue
-                cell_intersection = geometry_intersection(cell_geometry, geometry)
-                matching_geometry = cell_intersection.lines or cell_intersection.points
-                if matching_geometry is not None:
-                    break
-            if matching_geometry is not None:
-                intersections.append(
-                    EdgeIntersectionEvidence(
-                        source_id=edge.source_id,
-                        source_oid=edge.source_oid,
-                        network_edge_geometry=edge.geometry_working,
-                        in_aoi_intersection_geometry=matching_geometry,
-                        allowed_directions=edge.decision.allowed_directions,
-                        eligibility_reason=edge.decision.reason,
-                    )
+        for edge_index, matching_geometry in geometric_matches[cell_id]:
+            edge = ordered_edges[edge_index]
+            decision = decisions[edge_index]
+            if decision.eligibility_status != "eligible":
+                continue
+            intersections.append(
+                EdgeIntersectionEvidence(
+                    source_id=edge.source_id,
+                    source_oid=edge.source_oid,
+                    network_edge_geometry=edge.geometry_working,
+                    in_aoi_intersection_geometry=matching_geometry,
+                    allowed_directions=decision.allowed_directions,
+                    eligibility_reason=decision.reason,
                 )
+            )
         candidates.append(
             CellGeometryCandidate(
                 h3_id_hex=cell_id,
@@ -107,11 +144,85 @@ def build_geometry_candidates(
         candidate.has_eligible_intersection for candidate in candidates
     )
     logger.info(
-        "Built geometry evidence for %s cells; %s have eligible edge intersections",
+        "Spatially matched %s cell-edge pairs; %s edges intersect cells within the AOI; "
+        "built geometry evidence for %s cells with %s eligible cells",
+        len(spatial_pairs),
+        len(intersecting_edge_indexes),
         len(candidates),
         eligible_count,
     )
     return candidates
+
+
+def _spatial_join_cell_edge_pairs(
+    canonical_ids: list[str],
+    cell_geometries: Mapping[str, Any],
+    network_edges: list[Any],
+) -> list[tuple[int, int]]:
+    """Use ArcGIS's spatial index to find candidate cell-edge pairs."""
+    import arcpy
+    import uuid
+
+    if not canonical_ids or not network_edges:
+        return []
+
+    token = uuid.uuid4().hex
+    cell_features = f"memory/h3_cells_{token}"
+    edge_features = f"memory/network_edges_{token}"
+    pair_features = f"memory/cell_edge_pairs_{token}"
+    spatial_reference = cell_geometries[canonical_ids[0]].spatialReference
+    datasets = (pair_features, edge_features, cell_features)
+    try:
+        arcpy.management.CreateFeatureclass(
+            "memory",
+            f"h3_cells_{token}",
+            "POLYGON",
+            spatial_reference=spatial_reference,
+        )
+        arcpy.management.AddField(cell_features, "cell_index", "LONG")
+        with arcpy.da.InsertCursor(
+            cell_features,
+            ["cell_index", "SHAPE@"],
+        ) as cursor:
+            for cell_index, cell_id in enumerate(canonical_ids):
+                cursor.insertRow([cell_index, cell_geometries[cell_id]])
+
+        arcpy.management.CreateFeatureclass(
+            "memory",
+            f"network_edges_{token}",
+            "POLYLINE",
+            spatial_reference=spatial_reference,
+        )
+        arcpy.management.AddField(edge_features, "edge_index", "LONG")
+        with arcpy.da.InsertCursor(
+            edge_features,
+            ["edge_index", "SHAPE@"],
+        ) as cursor:
+            for edge_index, edge in enumerate(network_edges):
+                cursor.insertRow([edge_index, edge.geometry_working])
+
+        arcpy.analysis.SpatialJoin(
+            target_features=cell_features,
+            join_features=edge_features,
+            out_feature_class=pair_features,
+            join_operation="JOIN_ONE_TO_MANY",
+            join_type="KEEP_COMMON",
+            match_option="INTERSECT",
+        )
+        with arcpy.da.SearchCursor(
+            pair_features,
+            ["cell_index", "edge_index"],
+        ) as cursor:
+            return sorted(
+                {
+                    (int(cell_index), int(edge_index))
+                    for cell_index, edge_index in cursor
+                }
+            )
+    finally:
+        for dataset in datasets:
+            if arcpy.Exists(dataset):
+                arcpy.management.Delete(dataset)
 
 
 def build_cell_eligibility_result(

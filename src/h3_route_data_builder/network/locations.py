@@ -95,13 +95,15 @@ def locate_representative_candidates_by_cell(
     spatial_reference = ordered_candidates[0].point_geometry.spatialReference
     if spatial_reference is None or spatial_reference.name == "Unknown":
         raise ValueError("Representative points must have a known spatial reference")
-    if spatial_reference.type != "Projected":
-        raise ValueError("Representative points must use a projected spatial reference")
+    if spatial_reference.factoryCode != 4326:
+        raise ValueError("Representative points must use WGS 84 / EPSG:4326")
     if any(
         candidate.point_geometry.spatialReference != spatial_reference
         for candidate in ordered_candidates
     ):
-        raise ValueError("All representative candidates must use the same working CRS")
+        raise ValueError(
+            "All representative candidates must use the same spatial reference"
+        )
 
     feature_class_name = f"representatives_{uuid.uuid4().hex}"
     feature_class = f"memory/{feature_class_name}"

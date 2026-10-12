@@ -37,7 +37,7 @@ def rank_representative_candidates(
 
     Args:
         h3_id_hex: Canonical H3 cell identity.
-        cell_centroid: Cell centroid in the configured working projected CRS.
+        cell_centroid: Cell centroid in WGS 84 / EPSG:4326.
         intersecting_edges: Eligible in-AOI edge intersection evidence for the cell.
         snap_tolerance_m: Maximum allowed distance from the representative to its source edge.
 
@@ -56,26 +56,25 @@ def rank_representative_candidates(
     spatial_reference = cell_centroid.spatialReference
     if spatial_reference is None or spatial_reference.name == "Unknown":
         raise ValueError("cell_centroid has an unknown spatial reference")
-    if spatial_reference.type != "Projected":
-        raise ValueError(
-            "Representative selection requires a projected spatial reference"
-        )
-
     candidates: list[RepresentativeCandidate] = []
     for edge_evidence in intersecting_edges:
         edge_geometry = edge_evidence.network_edge_geometry
         intersection_geometry = edge_evidence.in_aoi_intersection_geometry
         if edge_geometry is None or intersection_geometry is None:
             continue
-        _validate_working_reference(cell_centroid, edge_geometry)
-        _validate_working_reference(cell_centroid, intersection_geometry)
+        _validate_matching_reference(cell_centroid, edge_geometry)
+        _validate_matching_reference(cell_centroid, intersection_geometry)
 
         for point_on_intersection in _nearest_intersection_points(
             intersection_geometry,
             cell_centroid,
         ):
-            point_on_edge, edge_measure, snap_distance_m, right_of_edge = (
+            point_on_edge, edge_measure, _, right_of_edge = (
                 edge_geometry.queryPointAndDistance(point_on_intersection, True)
+            )
+            snap_distance_m = _geodesic_distance_m(
+                point_on_intersection,
+                point_on_edge,
             )
             if snap_distance_m > snap_tolerance_m:
                 logger.debug(
@@ -94,7 +93,10 @@ def rank_representative_candidates(
                     source_id=edge_evidence.source_id,
                     source_oid=edge_evidence.source_oid,
                     pos_along=float(edge_measure),
-                    centroid_distance_m=float(cell_centroid.distanceTo(point_on_edge)),
+                    centroid_distance_m=_geodesic_distance_m(
+                        cell_centroid,
+                        point_on_edge,
+                    ),
                     snap_distance_m=float(snap_distance_m),
                     right_of_edge=bool(right_of_edge),
                 )
@@ -129,11 +131,14 @@ def _nearest_intersection_points(
                 )
         if not points:
             return []
-        minimum_distance = min(cell_centroid.distanceTo(point) for point in points)
+        point_distances = [
+            _geodesic_distance_m(cell_centroid, point) for point in points
+        ]
+        minimum_distance = min(point_distances)
         return [
             point
-            for point in points
-            if abs(cell_centroid.distanceTo(point) - minimum_distance) <= 1e-9
+            for point, distance in zip(points, point_distances)
+            if abs(distance - minimum_distance) <= 1e-6
         ]
     if geometry_type in {"polyline", "line"}:
         nearest_point, _, _, _ = intersection_geometry.queryPointAndDistance(
@@ -146,18 +151,19 @@ def _nearest_intersection_points(
     )
 
 
-def _validate_working_reference(first_geometry: Any, second_geometry: Any) -> None:
-    """Ensure both geometries have the same projected CRS."""
+def _validate_matching_reference(first_geometry: Any, second_geometry: Any) -> None:
+    """Ensure both geometries have the same declared CRS."""
     second_reference = second_geometry.spatialReference
     if second_reference is None or second_reference.name == "Unknown":
         raise ValueError(
             "Representative input geometry has an unknown spatial reference"
         )
-    if second_reference.type != "Projected":
-        raise ValueError(
-            "Representative input geometry must use a projected spatial reference"
-        )
     if first_geometry.spatialReference != second_reference:
         raise ValueError(
-            "Representative input geometries must use the same working CRS"
+            "Representative input geometries must use the same spatial reference"
         )
+
+
+def _geodesic_distance_m(first_point: Any, second_point: Any) -> float:
+    """Measure distance between point geometries geodesically in meters."""
+    return float(first_point.angleAndDistanceTo(second_point, "GEODESIC")[1])

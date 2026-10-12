@@ -296,8 +296,12 @@ def test_representative_candidates_tie_break_by_source_id_and_oid(arcpy_module) 
         (1, 9),
         (2, 1),
     ]
+    expected_distance = centroid.angleAndDistanceTo(
+        candidates[0].point_geometry,
+        "GEODESIC",
+    )[1]
     assert [candidate.centroid_distance_m for candidate in candidates] == pytest.approx(
-        [1, 1, 1]
+        [expected_distance, expected_distance, expected_distance]
     )
 
 
@@ -344,8 +348,8 @@ def make_representative_candidate(
     distance_m: float,
 ) -> RepresentativeCandidate:
     """Build a minimal representative candidate for location tests."""
-    spatial_reference = arcpy_module.SpatialReference(text=TEST_PROJECTED_CRS)
-    point = arcpy_module.PointGeometry(arcpy_module.Point(5, 5), spatial_reference)
+    spatial_reference = arcpy_module.SpatialReference(4326)
+    point = arcpy_module.PointGeometry(arcpy_module.Point(-74, 40), spatial_reference)
     return RepresentativeCandidate(
         h3_id_hex="8928308280fffff",
         point_geometry=point,

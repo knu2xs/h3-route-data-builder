@@ -13,14 +13,19 @@ staging/state checks can run in the project Python environment without ArcPy.
   network fixtures. ArcPy is supplied by ArcGIS Pro; Shapely and pyproj are not used.
 - For the optional real-data smoke test: the supplied StreetMap Premium 2025 network dataset,
   readable by ArcPy in the local ArcGIS Pro environment.
-- Configuration for an explicit area-appropriate `spatial.working_crs` and declared
-  `spatial.storage_crs`; geometry tests must not
-  rely on an implicit default CRS.
+- The AOI and network edge sources must have declared CRS in their data metadata. AOI, network,
+  H3, and output geometries use WGS 84 / EPSG:4326; representative ranking and snap distances use
+  geodesic measurements in meters. No CRS or datum-transformation setting is accepted.
 
-The feature configuration is expected to include explicit values for H3 resolution, travel mode,
-restrictions, intersection policy, snap tolerance, deterministic batch sizing, per-part row limit,
-and required total solvable-cell hard cap. The exact configuration key names are established in
-implementation tasks; no values are hardcoded by this guide.
+Feature configuration supplies H3 resolution, travel mode, restrictions, intersection policy, and
+snap tolerance. Batch size, staged-part row limit, and total solvable-cell hard cap are optional
+overrides; omitted values are inferred from available memory and output-volume free space, with
+batch size bounded by H3 candidate count. Effective values and their `inferred`/`set` source are
+logged and persisted with policy version 1 and the resource snapshot for deterministic resume.
+Batch defaults to 100 candidates per GiB available RAM (clamped to 100-2,000 and candidate count);
+part rows default to 1,000 per 128 MiB (clamped to 500-50,000); the hard cap defaults to half the
+output volume's free bytes divided by 8 KiB per cell (clamped to 1-5,000,000). ArcPy selects the first datum transformation
+ranked for each source extent when one is required; the run fails if none is available.
 
 ## Run Portable Checks
 

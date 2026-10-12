@@ -43,14 +43,10 @@ environments:
       log_dir: "reports/logs"
 
     spatial:
-      default_crs: "EPSG:4326"  # CRS to use when not specified by data source
       default_unit: "meters"    # Unit for distance calculations (e.g., "meters", "degrees")
-      working_crs: null  # Required per build; do not infer a projected CRS
-      storage_crs: "GCS_WGS_1984"  # GeoParquet geometry storage CRS; coordinates use GIS x/y order
-      datum_transformation: null  # Required only when source and target datums differ
       h3_resolution: null  # Required per build
       intersection_policy: "inclusive"
-      representative_snap_tolerance_m: null  # Required per build
+      representative_snap_tolerance_m: 100.0  # Default maximum representative snap distance
 
     network:
       travel_mode: null  # Required per build
@@ -58,9 +54,6 @@ environments:
 
     eligibility:
       representative_policy: "nearest_centroid_then_source_id_oid_measure"
-      batch_size: null  # Required per build
-      part_row_limit: null  # Required per build
-      total_output_hard_cap: null  # Required per build
 
     esri:
       gis_url: "https://prof-services.maps.arcgis.com"

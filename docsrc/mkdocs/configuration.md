@@ -40,7 +40,6 @@ environments:
       output: "data/processed/processed.gdb/output_data"
       log_dir: "reports/logs"
     spatial:
-      default_crs: "EPSG:4326"
       default_unit: "meters"
 
   dev:

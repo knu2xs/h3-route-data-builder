@@ -41,14 +41,28 @@ if importlib.util.find_spec("h3_route_data_builder") is None:
 import h3_route_data_builder
 from h3_route_data_builder.utils import get_logger
 from h3_route_data_builder.config import ConfigNode, config
+from h3_route_data_builder.eligibility.limits import recommend_execution_limits
 from h3_route_data_builder.network.workflow import run_geometry_eligibility
 
-# initialize logger for the toolbox
-logger = get_logger("h3_route_data_builder", level="INFO", add_arcpy_handler=True)
+logger = None
+
+
+def _initialize_toolbox_logger() -> Any:
+    """Return the single ArcPy logger shared by the toolbox and its tools."""
+    global logger
+    logger = get_logger(
+        "h3_route_data_builder",
+        level="INFO",
+        propagate=False,
+        add_arcpy_handler=True,
+    )
+    return logger
+
 
 class Toolbox:
     def __init__(self):
         """Define the toolbox (the name of the toolbox is the name of the .pyt file)."""
+        self.logger = _initialize_toolbox_logger()
         self.label = "h3-route-data-builder"
         self.alias = "h3_route_data_builder"
 
@@ -59,20 +73,24 @@ class Toolbox:
 
 
 class GeometryEligibilityTool:
-    """Create an auditable H3 eligibility dataset without generating OD pairs."""
+    """Build auditable H3 cells supported by eligible network edges without solving OD pairs."""
 
     def __init__(self) -> None:
         self.label = "Build H3 Geometry Eligibility"
-        self.description = "Validate an AOI and create reconciled H3 cell eligibility results from a network dataset."
-        self.category = "H3 Route Data Builder"
-        self.logger = get_logger(
-            f"h3_route_data_builder.Toolbox.{self.__class__.__name__}",
-            level="INFO",
-            add_arcpy_handler=False
+        self.description = (
+            "Validates a polygon AOI, identifies H3 cells intersecting traversable network edges, "
+            "and writes auditable eligibility GeoParquet in WGS 84 / EPSG:4326. Representative "
+            "and snap distances are geodesic meters. This tool does not generate OD candidates "
+            "or solve routes. Optional execution limits are inferred from local resources unless "
+            "overridden."
         )
+        self.category = "H3 Route Data Builder"
+        self.logger = _initialize_toolbox_logger()
+        self._inferred_limit_defaults: dict[str, int] = {}
+        self._explicit_limit_names: set[str] = set()
 
     def getParameterInfo(self) -> list[arcpy.Parameter]:
-        """Define AOI, network, CRS, and bounded-run parameters."""
+        """Define AOI, network, and bounded-run parameters."""
         aoi = arcpy.Parameter(
             displayName="Area of Interest",
             name="aoi",
@@ -96,22 +114,6 @@ class GeometryEligibilityTool:
             parameterType="Required",
             direction="Input",
         )
-        working_crs = arcpy.Parameter(
-            displayName="Working Projected Coordinate System",
-            name="working_crs",
-            datatype="GPCoordinateSystem",
-            parameterType="Required",
-            direction="Input",
-        )
-        storage_crs = arcpy.Parameter(
-            displayName="GeoParquet Storage Coordinate System",
-            name="storage_crs",
-            datatype="GPCoordinateSystem",
-            parameterType="Required",
-            direction="Input",
-        )
-        storage_crs.value = arcpy.SpatialReference("GCS_WGS_1984")
-
         h3_resolution = arcpy.Parameter(
             displayName="H3 Resolution",
             name="h3_resolution",
@@ -138,49 +140,43 @@ class GeometryEligibilityTool:
             parameterType="Required",
             direction="Input",
         )
+        snap_tolerance.value = config.get("spatial").get(
+            "representative_snap_tolerance_m"
+        )
         batch_size = arcpy.Parameter(
             displayName="Input Batch Size",
             name="batch_size",
             datatype="GPLong",
-            parameterType="Required",
+            parameterType="Optional",
             direction="Input",
         )
         part_limit = arcpy.Parameter(
             displayName="Staged Part Row Limit",
             name="part_row_limit",
             datatype="GPLong",
-            parameterType="Required",
+            parameterType="Optional",
             direction="Input",
         )
         output_cap = arcpy.Parameter(
             displayName="Total Solvable Cell Hard Cap",
             name="total_output_hard_cap",
             datatype="GPLong",
-            parameterType="Required",
-            direction="Input",
-        )
-        datum_transformation = arcpy.Parameter(
-            displayName="Datum Transformation",
-            name="datum_transformation",
-            datatype="GPString",
             parameterType="Optional",
             direction="Input",
         )
-
-        return [
+        parameters = [
             aoi,
             network,
             output,
-            working_crs,
-            storage_crs,
             h3_resolution,
             travel_mode,
             snap_tolerance,
             batch_size,
             part_limit,
             output_cap,
-            datum_transformation,
         ]
+        self._set_inferred_limit_defaults(parameters, Path.cwd())
+        return parameters
 
     def isLicensed(self) -> bool:
         """Require the Network Analyst extension to be licensed."""
@@ -188,7 +184,7 @@ class GeometryEligibilityTool:
 
     def updateParameters(self, parameters: list[arcpy.Parameter]) -> None:
         """Populate travel-mode choices from the selected network dataset."""
-        network, travel_mode = parameters[1], parameters[6]
+        network, travel_mode = parameters[1], parameters[4]
         if network.valueAsText and network.altered:
             try:
                 modes = arcpy.na.GetTravelModes(network.valueAsText)
@@ -198,14 +194,62 @@ class GeometryEligibilityTool:
                     travel_mode.value = default_mode
             except Exception as exc:
                 self.logger.warning(f"Could not load network travel modes: {exc}")
+        if parameters[2].valueAsText:
+            self._set_inferred_limit_defaults(parameters, parameters[2].valueAsText)
+
+    def _set_inferred_limit_defaults(
+        self,
+        parameters: list[arcpy.Parameter],
+        output_directory: str | Path,
+    ) -> None:
+        """Populate unmodified optional run limits using local resources."""
+        recommendations = recommend_execution_limits(output_directory).to_manifest()
+        for parameter in parameters:
+            recommendation = recommendations.get(parameter.name)
+            if recommendation is None:
+                continue
+            recommended_value = int(recommendation["value"])
+            previous_default = self._inferred_limit_defaults.get(parameter.name)
+            current_value = (
+                int(parameter.value) if parameter.value is not None else None
+            )
+            if current_value is None:
+                parameter.value = recommended_value
+                self._explicit_limit_names.discard(parameter.name)
+            elif parameter.name in self._explicit_limit_names:
+                pass
+            elif previous_default is None or current_value == previous_default:
+                parameter.value = recommended_value
+            else:
+                self._explicit_limit_names.add(parameter.name)
+            self._inferred_limit_defaults[parameter.name] = recommended_value
+
+    def _limit_override(self, parameter: arcpy.Parameter) -> int | None:
+        """Return a set override, or None when the displayed value is inferred."""
+        if parameter.value is None:
+            return None
+        parameter_value = int(parameter.value)
+        if parameter.name in self._explicit_limit_names:
+            return parameter_value
+        if parameter_value == self._inferred_limit_defaults.get(parameter.name):
+            return None
+        return parameter_value
 
     def updateMessages(self, parameters: list[arcpy.Parameter]) -> None:
         """Validate input layer shape and configured positive processing values."""
         aoi, network = parameters[0], parameters[1]
         if aoi.valueAsText:
             try:
-                if arcpy.Describe(aoi.valueAsText).shapeType.casefold() != "polygon":
+                aoi_description = arcpy.Describe(aoi.valueAsText)
+                if aoi_description.shapeType.casefold() != "polygon":
                     aoi.setErrorMessage("Area of Interest must be polygon geometry.")
+                elif (
+                    aoi_description.spatialReference is None
+                    or aoi_description.spatialReference.name == "Unknown"
+                ):
+                    aoi.setErrorMessage(
+                        "Area of Interest must have a defined coordinate system."
+                    )
             except Exception as exc:
                 aoi.setErrorMessage(f"Could not inspect AOI: {exc}")
         if network.valueAsText:
@@ -214,12 +258,12 @@ class GeometryEligibilityTool:
                     network.setErrorMessage("Input must be a Network Dataset.")
             except Exception as exc:
                 network.setErrorMessage(f"Could not inspect network dataset: {exc}")
-        for parameter_index in (8, 9, 10):
+        for parameter_index in (6, 7, 8):
             parameter = parameters[parameter_index]
             if parameter.value is not None and int(parameter.value) <= 0:
                 parameter.setErrorMessage("Value must be a positive integer.")
-        if parameters[7].value is not None and float(parameters[7].value) < 0:
-            parameters[7].setErrorMessage("Snap tolerance must be non-negative.")
+        if parameters[5].value is not None and float(parameters[5].value) < 0:
+            parameters[5].setErrorMessage("Snap tolerance must be non-negative.")
 
     def execute(self, parameters: list[arcpy.Parameter], messages: Any) -> None:
         """Validate, run the eligibility workflow, and report the result location."""
@@ -227,15 +271,12 @@ class GeometryEligibilityTool:
             aoi,
             network,
             output,
-            working_crs,
-            storage_crs,
             h3_resolution,
             travel_mode,
             snap_tolerance,
             batch_size,
             part_limit,
             output_cap,
-            datum_transformation,
         ) = parameters
         network_path = network.valueAsText
         travel_modes = arcpy.na.GetTravelModes(network_path)
@@ -247,12 +288,9 @@ class GeometryEligibilityTool:
         resolved_config = config.to_dict()
         resolved_config["spatial"].update(
             {
-                "working_crs": _spatial_reference_text(working_crs.value),
-                "storage_crs": _spatial_reference_text(storage_crs.value),
                 "h3_resolution": int(h3_resolution.value),
                 "intersection_policy": "inclusive",
                 "representative_snap_tolerance_m": float(snap_tolerance.value),
-                "datum_transformation": datum_transformation.valueAsText or None,
             }
         )
         resolved_config["network"].update(
@@ -263,18 +301,14 @@ class GeometryEligibilityTool:
                 ],
             }
         )
-        resolved_config["eligibility"].update(
-            {
-                "batch_size": int(batch_size.value),
-                "part_row_limit": int(part_limit.value),
-                "total_output_hard_cap": int(output_cap.value),
-            }
-        )
         summary = run_geometry_eligibility(
             aoi.valueAsText,
             network_path,
             output.valueAsText,
             ConfigNode(resolved_config),
+            batch_size=self._limit_override(batch_size),
+            part_row_limit=self._limit_override(part_limit),
+            total_output_hard_cap=self._limit_override(output_cap),
         )
         self.logger.info(
             "Eligibility run %s completed with %s solvable cells; output: %s",
@@ -282,10 +316,3 @@ class GeometryEligibilityTool:
             summary.solvable_cell_count,
             summary.run_directory,
         )
-
-
-def _spatial_reference_text(spatial_reference: arcpy.SpatialReference) -> str:
-    """Return a canonical spatial-reference WKT string from a toolbox parameter."""
-    if spatial_reference is None or spatial_reference.name == "Unknown":
-        raise ValueError("A known spatial reference is required")
-    return spatial_reference.exportToString()

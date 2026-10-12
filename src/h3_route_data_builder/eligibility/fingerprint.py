@@ -17,7 +17,6 @@ def build_input_fingerprint(
     network_fingerprint: str,
     travel_mode: str,
     restrictions: Sequence[str],
-    working_crs: str,
     h3_resolution: int,
     eligibility_policy: Mapping[str, Any],
     schema_version: str,
@@ -30,7 +29,6 @@ def build_input_fingerprint(
         network_fingerprint: Stable identity for the network dataset/build.
         travel_mode: Selected network travel mode.
         restrictions: Restriction names applied to edge eligibility.
-        working_crs: Configured spatial reference used for geometry operations.
         h3_resolution: Canonical H3 resolution for the run.
         eligibility_policy: JSON-compatible intersection and representative policy values.
         schema_version: Eligibility result/staging schema version.
@@ -47,7 +45,6 @@ def build_input_fingerprint(
         "aoi_fingerprint": aoi_fingerprint,
         "network_fingerprint": network_fingerprint,
         "travel_mode": travel_mode,
-        "working_crs": working_crs,
         "schema_version": schema_version,
     }
     missing_values = [name for name, value in required_values.items() if not value]
@@ -68,7 +65,6 @@ def build_input_fingerprint(
         "network_fingerprint": network_fingerprint,
         "travel_mode": travel_mode,
         "restrictions": sorted(set(restrictions)),
-        "working_crs": working_crs,
         "h3_resolution": h3_resolution,
         "eligibility_policy": eligibility_policy,
         "schema_version": schema_version,

@@ -49,7 +49,10 @@ def test_output_table_has_required_geoparquet_and_location_fields() -> None:
         "centroid_geometry",
         "representative_geometry",
     }
-    assert all(column["crs"] is None for column in geo_metadata["columns"].values())
+    assert all(
+        column["crs"]["id"] == {"authority": "EPSG", "code": 4326}
+        for column in geo_metadata["columns"].values()
+    )
 
 
 def test_output_table_keeps_representative_fields_null_for_ineligible_cell() -> None:

@@ -3,6 +3,8 @@
 import json
 from uuid import uuid4
 
+import pytest
+
 from h3_route_data_builder.config import ConfigNode
 from h3_route_data_builder.network.workflow import run_geometry_eligibility
 
@@ -58,6 +60,7 @@ def test_streetmap_network_builds_reconciled_small_aoi_without_source_edits(
     arcpy_module,
     real_network_dataset: str,
     temp_dir,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Build a small real-network AOI into temporary output without editing its source."""
     network_path = real_network_dataset
@@ -92,17 +95,6 @@ def test_streetmap_network_builds_reconciled_small_aoi_without_source_edits(
     config_node = ConfigNode(
         {
             "spatial": {
-                "working_crs": (
-                    'PROJCS["Eligibility Test CRS",GEOGCS["GCS_WGS_1984",'
-                    'DATUM["D_WGS_1984",SPHEROID["WGS_1984",6378137,298.257223563]],'
-                    'PRIMEM["Greenwich",0],UNIT["Degree",0.0174532925199433]],'
-                    'PROJECTION["Mercator_1SP"],PARAMETER["False_Easting",0],'
-                    'PARAMETER["False_Northing",0],PARAMETER["Central_Meridian",0],'
-                    'PARAMETER["Scale_Factor",1],PARAMETER["Latitude_Of_Origin",0],'
-                    'UNIT["Meter",1],AXIS["X",EAST],AXIS["Y",NORTH]]'
-                ),
-                "storage_crs": "GCS_WGS_1984",
-                "datum_transformation": None,
                 "h3_resolution": 9,
                 "intersection_policy": "inclusive",
                 "representative_snap_tolerance_m": 0.1,
@@ -113,24 +105,69 @@ def test_streetmap_network_builds_reconciled_small_aoi_without_source_edits(
             },
             "eligibility": {
                 "representative_policy": "nearest_centroid_then_source_id_oid_measure",
-                "batch_size": 200,
-                "part_row_limit": 500,
-                "total_output_hard_cap": 1000,
             },
         }
     )
+    output_directory = temp_dir / "eligibility-output"
     try:
         result = run_geometry_eligibility(
             aoi_path,
             network_path,
-            temp_dir / "eligibility-output",
+            output_directory,
             config_node,
         )
         assert result.run_status == "complete"
         assert result.expected_partition_count == result.reconciled_partition_count
         assert result.cell_result_count > 0
-        assert (result.run_directory / "run-manifest.json").is_file()
+        manifest_path = result.run_directory / "run-manifest.json"
+        assert manifest_path.is_file()
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        assert {
+            name: limit["source"]
+            for name, limit in manifest["execution_limits"].items()
+            if name in {"batch_size", "part_row_limit", "total_output_hard_cap"}
+        } == {
+            "batch_size": "inferred",
+            "part_row_limit": "inferred",
+            "total_output_hard_cap": "inferred",
+        }
+        assert all(
+            int(limit["value"]) > 0
+            for name, limit in manifest["execution_limits"].items()
+            if name in {"batch_size", "part_row_limit", "total_output_hard_cap"}
+        )
+        assert manifest["execution_limits"]["policy_version"] == "1"
+        assert (
+            manifest["execution_limits"]["resource_snapshot"]["available_memory_bytes"]
+            > 0
+        )
+        assert (
+            manifest["execution_limits"]["resource_snapshot"]["available_disk_bytes"]
+            > 0
+        )
+        assert "Execution limit batch_size=" in caplog.text
+        assert "inferred" in caplog.text
         assert (result.run_directory / "run-state.json").is_file()
+        resumed_result = run_geometry_eligibility(
+            aoi_path,
+            network_path,
+            output_directory,
+            config_node,
+        )
+        assert resumed_result.run_id == result.run_id
+        assert "reused from existing run" in caplog.text
+        caplog.clear()
+        with pytest.raises(
+            ValueError,
+            match="Explicit execution limits differ from the existing run",
+        ):
+            run_geometry_eligibility(
+                aoi_path,
+                network_path,
+                output_directory,
+                config_node,
+                batch_size=int(manifest["execution_limits"]["batch_size"]["value"]) + 1,
+            )
     finally:
         if arcpy_module.Exists(aoi_path):
             arcpy_module.management.Delete(aoi_path)

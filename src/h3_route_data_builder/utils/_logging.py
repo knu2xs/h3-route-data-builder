@@ -83,6 +83,7 @@ class ArcpyHandler(logging.Handler):
 
     # since everything goes through ArcPy methods, we do not need a message line terminator
     terminator = ""
+    _h3_route_data_builder_arcpy_handler = True
 
     def __init__(self, level: Union[int, str] = 10):
         # throw logical error if arcpy not available
@@ -218,11 +219,20 @@ def get_logger(
         stream_handler.setFormatter(log_frmt)
 
 
-    # if in an environment with ArcPy, and desired, add handler to bubble logging up to ArcGIS through ArcPy
+    # Reuse the ArcPy handler because Python toolboxes can be reloaded in one process.
     if find_spec("arcpy") is not None and add_arcpy_handler:
-        ah = ArcpyHandler()
+        arcpy_handlers = [
+            handler
+            for handler in logger.handlers
+            if getattr(handler, "_h3_route_data_builder_arcpy_handler", False)
+        ]
+        ah = arcpy_handlers[0] if arcpy_handlers else None
+        for duplicate in arcpy_handlers[1:]:
+            logger.removeHandler(duplicate)
+        if ah is None:
+            ah = ArcpyHandler()
+            logger.addHandler(ah)
         ah.setFormatter(log_frmt)
-        logger.addHandler(ah)
 
     # if a path for the logfile is provided, log results to the file
     if logfile_path is not None:

@@ -10,6 +10,7 @@ from h3_route_data_builder.utils import get_logger
 from h3_route_data_builder.eligibility.models import CellEligibilityResult
 
 logger = get_logger(__name__, level="DEBUG", add_stream_handler=False)
+WGS84_CRS_NAME = "GCS_WGS_1984"
 
 
 @dataclass(frozen=True)
@@ -74,25 +75,68 @@ def validate_aoi_geometry(
     return source_reference
 
 
+def _best_available_datum_transformation(
+    source_spatial_reference: arcpy.SpatialReference,
+    target_spatial_reference: arcpy.SpatialReference,
+    source_extent: arcpy.Extent,
+) -> str | None:
+    """Select ArcPy's highest-ranked transformation for the source extent."""
+    if (
+        source_spatial_reference is None
+        or source_spatial_reference.name == "Unknown"
+        or target_spatial_reference is None
+        or target_spatial_reference.name == "Unknown"
+    ):
+        raise ValueError("Source and target spatial references must be known")
+    if source_spatial_reference.GCS.name == target_spatial_reference.GCS.name:
+        return None
+
+    try:
+        transformations = arcpy.ListTransformations(
+            source_spatial_reference,
+            target_spatial_reference,
+            source_extent,
+        )
+    except Exception as exc:
+        message = (
+            "Could not list datum transformations from "
+            f"'{source_spatial_reference.name}' to '{target_spatial_reference.name}': {exc}"
+        )
+        logger.error(message)
+        raise RuntimeError(message) from exc
+    if not transformations:
+        raise ValueError(
+            "No datum transformation is available from "
+            f"'{source_spatial_reference.name}' to '{target_spatial_reference.name}' "
+            "for the input extent"
+        )
+
+    selected_transformation = transformations[0]
+    logger.info(
+        "Selected datum transformation %s from %s to %s",
+        selected_transformation,
+        source_spatial_reference.name,
+        target_spatial_reference.name,
+    )
+    return selected_transformation
+
+
 def project_geometry(
     geometry: arcpy.Geometry,
     target_spatial_reference: arcpy.SpatialReference,
-    datum_transformation: str | None = None,
 ) -> arcpy.Geometry:
-    """Project geometry explicitly into a configured projected spatial reference.
+    """Project geometry explicitly into a declared target spatial reference.
 
     Args:
         geometry: Input ArcPy geometry with a declared spatial reference.
-        target_spatial_reference: Configured projected spatial reference.
-        datum_transformation: Required ArcGIS transformation name when source and target
-            geodetic datums differ.
+        target_spatial_reference: Declared target spatial reference.
 
     Returns:
         A new geometry projected to the target spatial reference.
 
     Raises:
-        ValueError: If either reference is unknown, target is not projected, or a required
-            datum transformation is not supplied.
+        ValueError: If either reference is unknown or no datum transformation is available
+            for the input extent.
         RuntimeError: If ArcPy projection fails.
     """
     if geometry is None or geometry.pointCount == 0:
@@ -102,20 +146,14 @@ def project_geometry(
         raise ValueError("Input geometry has an unknown spatial reference")
     if target_spatial_reference is None or target_spatial_reference.name == "Unknown":
         raise ValueError("Target spatial reference must be known")
-    if target_spatial_reference.type != "Projected":
-        raise ValueError("Target spatial reference must be projected")
-
-    source_geodetic_name = source_spatial_reference.GCS.name
-    target_geodetic_name = target_spatial_reference.GCS.name
-    if source_geodetic_name != target_geodetic_name and not datum_transformation:
-        raise ValueError(
-            "A datum transformation is required between the source and target references"
-        )
+    transformation = _best_available_datum_transformation(
+        source_spatial_reference,
+        target_spatial_reference,
+        geometry.extent,
+    )
 
     try:
-        projected = geometry.projectAs(
-            target_spatial_reference, datum_transformation or ""
-        )
+        projected = geometry.projectAs(target_spatial_reference, transformation or "")
     except arcpy.ExecuteError as exc:
         message = f"Could not project geometry from '{source_spatial_reference.name}' to '{target_spatial_reference.name}': {arcpy.GetMessages(2)}"
         logger.error(message)
@@ -125,7 +163,7 @@ def project_geometry(
         "Projected geometry from %s to %s%s",
         source_spatial_reference.name,
         target_spatial_reference.name,
-        f" using {datum_transformation}" if datum_transformation else "",
+        f" using {transformation}" if transformation else "",
     )
     return projected
 
@@ -133,7 +171,6 @@ def project_geometry(
 def candidate_h3_cells_for_aoi(
     aoi_geometry: arcpy.Geometry,
     resolution: int,
-    datum_transformation: str | None = None,
 ) -> list[str]:
     """Project a valid AOI to H3's geographic coordinates and return candidate cell IDs.
 
@@ -143,29 +180,26 @@ def candidate_h3_cells_for_aoi(
     Args:
         aoi_geometry: Valid AOI polygon with a declared ArcPy spatial reference.
         resolution: Configured H3 resolution from 0 through 15.
-        datum_transformation: ArcGIS transformation name when the AOI datum differs from WGS 84.
 
     Returns:
         Canonical lowercase hexadecimal candidate H3 IDs in deterministic order.
 
     Raises:
-        ValueError: If the AOI, resolution, or required datum transformation is invalid.
+        ValueError: If the AOI, resolution, or datum transformation is invalid.
         RuntimeError: If ArcPy cannot project the AOI to H3 geographic coordinates.
     """
     validate_aoi_geometry(aoi_geometry)
-    h3_spatial_reference = arcpy.SpatialReference("GCS_WGS_1984")
+    h3_spatial_reference = arcpy.SpatialReference(WGS84_CRS_NAME)
     source_reference = aoi_geometry.spatialReference
-    if (
-        source_reference.GCS.name != h3_spatial_reference.GCS.name
-        and not datum_transformation
-    ):
-        raise ValueError(
-            "A datum transformation is required to project the AOI to H3 coordinates"
-        )
+    transformation = _best_available_datum_transformation(
+        source_reference,
+        h3_spatial_reference,
+        aoi_geometry.extent,
+    )
     try:
         aoi_in_h3_coordinates = aoi_geometry.projectAs(
             h3_spatial_reference,
-            datum_transformation or "",
+            transformation or "",
         )
     except arcpy.ExecuteError as exc:
         message = f"Could not project AOI to H3 geographic coordinates: {arcpy.GetMessages(2)}"
@@ -184,28 +218,24 @@ def candidate_h3_cells_for_aoi(
 
 def h3_cell_polygon(
     cell_id: str,
-    working_spatial_reference: arcpy.SpatialReference,
-    datum_transformation: str | None = None,
 ) -> arcpy.Geometry:
-    """Construct and project a canonical H3 cell polygon with ArcPy.
+    """Construct a canonical H3 cell polygon in WGS 84 with ArcPy.
 
     Args:
         cell_id: Canonical H3 cell ID.
-        working_spatial_reference: Configured projected CRS for geometry operations.
-        datum_transformation: Required ArcGIS transformation when datums differ.
 
     Returns:
-        H3 cell polygon projected to the configured working reference.
+        H3 cell polygon in WGS 84 / EPSG:4326.
 
     Raises:
-        ValueError: If the cell ID or target CRS is invalid.
-        RuntimeError: If ArcPy cannot construct or project the geometry.
+        ValueError: If the cell ID is invalid.
+        RuntimeError: If ArcPy cannot construct the geometry.
     """
     boundary = h3_cell_boundary(cell_id)
     if len(boundary) < 3:
         raise ValueError(f"H3 cell {cell_id!r} has fewer than three boundary vertices")
 
-    h3_spatial_reference = arcpy.SpatialReference("GCS_WGS_1984")
+    h3_spatial_reference = arcpy.SpatialReference(WGS84_CRS_NAME)
     closed_boundary = list(boundary)
     if closed_boundary[0] != closed_boundary[-1]:
         closed_boundary.append(closed_boundary[0])
@@ -218,31 +248,24 @@ def h3_cell_polygon(
         message = f"Could not construct ArcPy polygon for H3 cell {cell_id!r}: {arcpy.GetMessages(2)}"
         logger.error(message)
         raise RuntimeError(message) from exc
-    return project_geometry(polygon, working_spatial_reference, datum_transformation)
+    return polygon
 
 
 def cell_result_geometries_wkb(
     results: list[CellEligibilityResult],
-    storage_spatial_reference: arcpy.SpatialReference,
-    datum_transformation: str | None = None,
 ) -> dict[str, tuple[bytes, bytes, bytes | None]]:
-    """Project cell output geometries to storage CRS and encode them as WKB.
+    """Encode validated WGS 84 cell output geometries as WKB.
 
     Args:
         results: Validated cell results with ArcPy cell, centroid, and representative geometry.
-        storage_spatial_reference: Explicit configured CRS for the serialized GeoParquet output.
-        datum_transformation: ArcGIS transformation to apply when source and storage datums differ.
 
     Returns:
         H3 ID to cell WKB, centroid WKB, and optional representative WKB mapping.
 
     Raises:
         ValueError: If required geometries or spatial references are missing or unknown.
-        RuntimeError: If ArcPy cannot project an output geometry.
     """
-    if storage_spatial_reference is None or storage_spatial_reference.name == "Unknown":
-        raise ValueError("storage_spatial_reference must be known")
-
+    output_spatial_reference = arcpy.SpatialReference(WGS84_CRS_NAME)
     serialized: dict[str, tuple[bytes, bytes, bytes | None]] = {}
     for result in results:
         if result.cell_geometry is None or result.centroid_geometry is None:
@@ -255,62 +278,30 @@ def cell_result_geometries_wkb(
                 centroid_geometry,
                 result.cell_geometry.spatialReference,
             )
-        cell_storage = _project_for_storage(
-            result.cell_geometry,
-            storage_spatial_reference,
-            datum_transformation,
-        )
-        centroid_storage = _project_for_storage(
-            centroid_geometry,
-            storage_spatial_reference,
-            datum_transformation,
-        )
+        _validate_wgs84_geometry(result.cell_geometry)
+        _validate_wgs84_geometry(centroid_geometry)
+        cell_wkb = bytes(result.cell_geometry.WKB)
+        centroid_wkb = bytes(centroid_geometry.WKB)
         representative_wkb: bytes | None = None
         if result.representative is not None:
-            working_reference = result.cell_geometry.spatialReference
             point_geometry = arcpy.PointGeometry(
                 arcpy.Point(result.representative.x, result.representative.y),
-                working_reference,
+                output_spatial_reference,
             )
-            representative_storage = _project_for_storage(
-                point_geometry,
-                storage_spatial_reference,
-                datum_transformation,
-            )
-            representative_wkb = bytes(representative_storage.WKB)
+            representative_wkb = bytes(point_geometry.WKB)
         serialized[result.h3_id_hex] = (
-            bytes(cell_storage.WKB),
-            bytes(centroid_storage.WKB),
+            cell_wkb,
+            centroid_wkb,
             representative_wkb,
         )
     return serialized
 
 
-def _project_for_storage(
-    geometry: arcpy.Geometry,
-    storage_spatial_reference: arcpy.SpatialReference,
-    datum_transformation: str | None,
-) -> arcpy.Geometry:
-    """Project one geometry to the declared storage CRS, including geographic CRSs."""
-    source_reference = geometry.spatialReference
-    if source_reference is None or source_reference.name == "Unknown":
-        raise ValueError("Output geometry has an unknown spatial reference")
-    if (
-        source_reference.GCS.name != storage_spatial_reference.GCS.name
-        and not datum_transformation
-    ):
-        raise ValueError(
-            "A datum transformation is required for output storage geometry"
-        )
-    try:
-        return geometry.projectAs(storage_spatial_reference, datum_transformation or "")
-    except arcpy.ExecuteError as exc:
-        message = (
-            f"Could not project output geometry to '{storage_spatial_reference.name}': "
-            f"{arcpy.GetMessages(2)}"
-        )
-        logger.error(message)
-        raise RuntimeError(message) from exc
+def _validate_wgs84_geometry(geometry: arcpy.Geometry) -> None:
+    """Require output geometry to already use the fixed WGS84 spatial reference."""
+    spatial_reference = geometry.spatialReference
+    if spatial_reference is None or spatial_reference.factoryCode != 4326:
+        raise ValueError("Eligibility output geometry must use WGS 84 / EPSG:4326")
 
 
 def geometry_intersection(
@@ -320,8 +311,8 @@ def geometry_intersection(
     """Return point and line components of the inclusive topological intersection.
 
     Args:
-        first_geometry: First geometry in the configured projected CRS.
-        second_geometry: Second geometry in the same projected CRS.
+        first_geometry: First geometry in a declared spatial reference.
+        second_geometry: Second geometry in the same spatial reference.
 
     Returns:
         Zero-dimensional and one-dimensional intersection geometries, or ``None`` for
@@ -330,7 +321,7 @@ def geometry_intersection(
     Raises:
         ValueError: If either geometry is empty, has unknown CRS, or the references differ.
     """
-    _validate_matching_projected_references(first_geometry, second_geometry)
+    _validate_matching_spatial_references(first_geometry, second_geometry)
     if first_geometry.disjoint(second_geometry):
         return GeometryIntersection(points=None, lines=None)
 
@@ -346,11 +337,11 @@ def intersects_inclusive(
     first_geometry: arcpy.Geometry,
     second_geometry: arcpy.Geometry,
 ) -> bool:
-    """Return whether two projected geometries share any point, line, or area.
+    """Return whether two geometries share any point, line, or area.
 
     Args:
-        first_geometry: First geometry in the configured projected CRS.
-        second_geometry: Second geometry in the same projected CRS.
+        first_geometry: First geometry in a declared spatial reference.
+        second_geometry: Second geometry in the same spatial reference.
 
     Returns:
         True if the geometries intersect at any topological dimension.
@@ -368,8 +359,8 @@ def clip_edge_to_aoi(
     """Clip edge geometry to the AOI while preserving boundary point contacts.
 
     Args:
-        edge_geometry: Polyline edge in the working projected CRS.
-        aoi_geometry: Valid polygon AOI in the same working projected CRS.
+        edge_geometry: Polyline edge in a declared spatial reference.
+        aoi_geometry: Valid polygon AOI in the same spatial reference.
 
     Returns:
         Point and line components of the edge/AOI intersection.
@@ -381,11 +372,11 @@ def clip_edge_to_aoi(
     return geometry_intersection(edge_geometry, aoi_geometry)
 
 
-def _validate_matching_projected_references(
+def _validate_matching_spatial_references(
     first_geometry: arcpy.Geometry,
     second_geometry: arcpy.Geometry,
 ) -> None:
-    """Validate non-empty geometries share a known projected spatial reference."""
+    """Validate non-empty geometries share the same known spatial reference."""
     if first_geometry is None or first_geometry.pointCount == 0:
         raise ValueError("First geometry must be non-empty")
     if second_geometry is None or second_geometry.pointCount == 0:
@@ -396,9 +387,5 @@ def _validate_matching_projected_references(
         raise ValueError("First geometry has an unknown spatial reference")
     if second_reference is None or second_reference.name == "Unknown":
         raise ValueError("Second geometry has an unknown spatial reference")
-    if first_reference.type != "Projected" or second_reference.type != "Projected":
-        raise ValueError("Geometry operations require projected spatial references")
     if first_reference != second_reference:
-        raise ValueError(
-            "Geometry inputs must use the same projected spatial reference"
-        )
+        raise ValueError("Geometry inputs must use the same spatial reference")

@@ -6,6 +6,7 @@ import pytest
 import h3
 
 from h3_route_data_builder.network.geometry import (
+    _best_available_datum_transformation,
     candidate_h3_cells_for_aoi,
     cell_result_geometries_wkb,
     h3_cell_polygon,
@@ -124,6 +125,81 @@ def test_project_geometry_uses_explicit_target_spatial_reference(
     assert projected.area > 0
 
 
+def test_project_geometry_supports_wgs84_geographic_target(
+    arcpy_module: Any,
+    projected_spatial_reference: Any,
+) -> None:
+    source_geometry = make_polygon(
+        arcpy_module,
+        [(-1000, -1000), (1000, -1000), (1000, 1000), (-1000, 1000)],
+        projected_spatial_reference,
+    )
+    wgs84 = arcpy_module.SpatialReference(4326)
+
+    projected = project_geometry(source_geometry, wgs84)
+
+    assert projected.spatialReference.factoryCode == 4326
+    assert -180 <= projected.centroid.X <= 180
+    assert -90 <= projected.centroid.Y <= 90
+
+
+def test_best_available_datum_transformation_uses_arcgys_first_candidate(
+    arcpy_module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_reference = arcpy_module.SpatialReference(4267)
+    target_reference = arcpy_module.SpatialReference(4326)
+    source_extent = arcpy_module.Extent(-75, 40, -73, 42)
+    calls: list[tuple[Any, Any, Any]] = []
+
+    def list_transformations(
+        from_reference: Any,
+        to_reference: Any,
+        extent: Any,
+    ) -> list[str]:
+        calls.append((from_reference, to_reference, extent))
+        return ["best-area-match", "lower-ranked"]
+
+    monkeypatch.setattr(arcpy_module, "ListTransformations", list_transformations)
+
+    selected = _best_available_datum_transformation(
+        source_reference,
+        target_reference,
+        source_extent,
+    )
+
+    assert selected == "best-area-match"
+    assert calls == [(source_reference, target_reference, source_extent)]
+
+
+def test_best_available_datum_transformation_fails_without_candidates(
+    arcpy_module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_reference = arcpy_module.SpatialReference(4267)
+    target_reference = arcpy_module.SpatialReference(4326)
+    source_extent = arcpy_module.Extent(-75, 40, -73, 42)
+
+    def list_no_transformations(
+        from_reference: Any,
+        to_reference: Any,
+        extent: Any,
+    ) -> list[str]:
+        assert from_reference.factoryCode == 4267
+        assert to_reference.factoryCode == 4326
+        assert extent is source_extent
+        return []
+
+    monkeypatch.setattr(arcpy_module, "ListTransformations", list_no_transformations)
+
+    with pytest.raises(ValueError, match="No datum transformation is available"):
+        _best_available_datum_transformation(
+            source_reference,
+            target_reference,
+            source_extent,
+        )
+
+
 @pytest.mark.parametrize(
     ("line_coordinates", "expected"),
     [
@@ -178,14 +254,13 @@ def test_clip_edge_to_aoi_returns_only_in_aoi_linework(
     assert clipped.points.pointCount == 2
 
 
-def test_pentagon_and_neighbor_cells_project_and_remain_in_candidate_cover(
+def test_pentagon_and_neighbor_cells_use_wgs84_and_remain_in_candidate_cover(
     arcpy_module: Any,
-    projected_spatial_reference: Any,
 ) -> None:
     pentagon = h3.get_pentagons(4)[0]
     adjacent_cell = next(cell for cell in h3.grid_disk(pentagon, 1) if cell != pentagon)
-    pentagon_polygon = h3_cell_polygon(pentagon, projected_spatial_reference)
-    adjacent_polygon = h3_cell_polygon(adjacent_cell, projected_spatial_reference)
+    pentagon_polygon = h3_cell_polygon(pentagon)
+    adjacent_polygon = h3_cell_polygon(adjacent_cell)
     combined_aoi = pentagon_polygon.union(adjacent_polygon)
 
     candidate_ids = candidate_h3_cells_for_aoi(combined_aoi, resolution=4)
@@ -242,6 +317,85 @@ def test_geometry_candidates_use_only_eligible_edges_inside_aoi(
     assert not by_id["8928308280bffff"].has_eligible_intersection
 
 
+def test_geometry_candidates_classify_only_unique_intersecting_edges(
+    arcpy_module: Any,
+    square_aoi: Any,
+    projected_spatial_reference: Any,
+) -> None:
+    cells = {
+        "8928308280fffff": make_polygon(
+            arcpy_module,
+            [(0, 0), (6, 0), (6, 10), (0, 10)],
+            projected_spatial_reference,
+        ),
+        "8928308280bffff": make_polygon(
+            arcpy_module,
+            [(4, 0), (10, 0), (10, 10), (4, 10)],
+            projected_spatial_reference,
+        ),
+    }
+    edges = [
+        NetworkEdgeRecord(
+            source_id=1,
+            source_oid=100,
+            source_name="Streets",
+            geometry_working=make_polyline(
+                arcpy_module, [[(-1, 5), (11, 5)]], projected_spatial_reference
+            ),
+            decision=None,
+            evaluator_fields={"TRAVERSABLE": True},
+        ),
+        NetworkEdgeRecord(
+            source_id=1,
+            source_oid=101,
+            source_name="Streets",
+            geometry_working=make_polyline(
+                arcpy_module, [[(-1, 2), (11, 2)]], projected_spatial_reference
+            ),
+            decision=None,
+            evaluator_fields={"TRAVERSABLE": False},
+        ),
+        NetworkEdgeRecord(
+            source_id=1,
+            source_oid=102,
+            source_name="Streets",
+            geometry_working=make_polyline(
+                arcpy_module, [[(-1, 20), (11, 20)]], projected_spatial_reference
+            ),
+            decision=None,
+            evaluator_fields={"TRAVERSABLE": True},
+        ),
+    ]
+    decisions = {
+        100: EdgeEligibilityDecision(
+            "eligible", ("AlongDigitizedDirection",), "allowed"
+        ),
+        101: EdgeEligibilityDecision("restricted", (), "restricted"),
+        102: EdgeEligibilityDecision(
+            "eligible", ("AlongDigitizedDirection",), "allowed"
+        ),
+    }
+    classified_oids: list[int] = []
+
+    def classify(edge: NetworkEdgeRecord) -> EdgeEligibilityDecision:
+        classified_oids.append(edge.source_oid)
+        return decisions[edge.source_oid]
+
+    candidates = build_geometry_candidates(
+        cells,
+        edges,
+        square_aoi,
+        resolution=9,
+        edge_classifier=classify,
+    )
+
+    assert classified_oids == [100, 101]
+    assert all(
+        [edge.source_oid for edge in candidate.intersecting_edges] == [100]
+        for candidate in candidates
+    )
+
+
 def test_geometry_candidate_evidence_is_clipped_to_the_cell(
     arcpy_module: Any,
     square_aoi: Any,
@@ -275,14 +429,14 @@ def test_geometry_candidate_evidence_is_clipped_to_the_cell(
     assert intersection_geometry.extent.XMax == pytest.approx(6)
 
 
-def test_cell_result_geometries_are_projected_to_storage_crs_wkb(
+def test_cell_result_geometries_are_written_as_wgs84_wkb(
     arcpy_module: Any,
-    projected_spatial_reference: Any,
 ) -> None:
+    wgs84 = arcpy_module.SpatialReference(4326)
     cell_geometry = make_polygon(
         arcpy_module,
-        [(-10, -10), (10, -10), (10, 10), (-10, 10)],
-        projected_spatial_reference,
+        [(-74.01, 40.70), (-73.99, 40.70), (-73.99, 40.72), (-74.01, 40.72)],
+        wgs84,
     )
     result = CellEligibilityResult(
         h3_id_hex="8928308280fffff",
@@ -290,30 +444,31 @@ def test_cell_result_geometries_are_projected_to_storage_crs_wkb(
         eligibility_status=EligibilityStatus.SOLVABLE,
         eligibility_reason="validated",
         intersecting_edge_count=1,
-        representative=NetworkLocation(-5, 0, 1, 10, 0.25, 1, 0.0),
+        representative=NetworkLocation(-74.0, 40.71, 1, 10, 0.25, 1, 0.0),
         build_fingerprint="fingerprint",
         cell_geometry=cell_geometry,
         centroid_geometry=arcpy_module.PointGeometry(
             cell_geometry.centroid,
-            projected_spatial_reference,
+            wgs84,
         ),
     )
-    storage_spatial_reference = arcpy_module.SpatialReference("GCS_WGS_1984")
+    output_spatial_reference = wgs84
 
-    geometries = cell_result_geometries_wkb([result], storage_spatial_reference)
+    geometries = cell_result_geometries_wkb([result])
 
     cell_wkb, centroid_wkb, representative_wkb = geometries[result.h3_id_hex]
+    assert output_spatial_reference.factoryCode == 4326
+    cell_output = arcpy_module.FromWKB(cell_wkb, output_spatial_reference)
+    assert cell_output.type.casefold() == "polygon"
+    assert -74.1 < cell_output.extent.XMax < -73.9
+    assert 40.6 < cell_output.extent.YMax < 40.8
     assert (
-        arcpy_module.FromWKB(cell_wkb, storage_spatial_reference).type.casefold()
-        == "polygon"
-    )
-    assert (
-        arcpy_module.FromWKB(centroid_wkb, storage_spatial_reference).type.casefold()
+        arcpy_module.FromWKB(centroid_wkb, output_spatial_reference).type.casefold()
         == "point"
     )
     assert (
         arcpy_module.FromWKB(
-            representative_wkb, storage_spatial_reference
+            representative_wkb, output_spatial_reference
         ).type.casefold()
         == "point"
     )

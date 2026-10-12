@@ -3,7 +3,7 @@
 import ast
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -11,6 +11,10 @@ from typing import Any
 import arcpy
 
 from h3_route_data_builder.utils import get_logger
+from h3_route_data_builder.network.geometry import (
+    WGS84_CRS_NAME,
+    _best_available_datum_transformation,
+)
 
 logger = get_logger(__name__, level="DEBUG", add_stream_handler=False)
 
@@ -81,13 +85,14 @@ class NetworkDatasetMetadata:
 
 @dataclass(frozen=True)
 class NetworkEdgeRecord:
-    """One AOI-intersecting edge with its eligibility evidence."""
+    """One spatially filtered edge and its optional eligibility evidence."""
 
     source_id: int
     source_oid: int
     source_name: str
     geometry_working: arcpy.Geometry
-    decision: EdgeEligibilityDecision
+    decision: EdgeEligibilityDecision | None = None
+    evaluator_fields: dict[str, Any] = field(default_factory=dict)
 
 
 def load_network_metadata(network_dataset_path: str) -> NetworkDatasetMetadata:
@@ -211,21 +216,23 @@ def iter_network_edges(
     network_dataset_path: str,
     travel_mode_name: str,
     spatial_filter: arcpy.Geometry,
-    working_spatial_reference: arcpy.SpatialReference,
-    datum_transformation: str | None = None,
+    *,
+    defer_eligibility: bool = False,
+    metadata: NetworkDatasetMetadata | None = None,
 ) -> Iterator[NetworkEdgeRecord]:
-    """Yield AOI-intersecting edge features with fail-closed travel eligibility.
+    """Yield spatially filtered edge features and optionally evaluate traversability.
 
     The SearchCursor uses the caller's projected AOI as a spatial filter and projects returned
-    edge shapes into the same working CRS. It reads only the fields referenced by supported
+    edge shapes into WGS 84. It reads only the fields referenced by supported
     network evaluator metadata, plus the source OID and geometry.
 
     Args:
         network_dataset_path: ArcPy-resolvable network dataset path.
         travel_mode_name: Configured travel mode name.
-        spatial_filter: Valid AOI geometry in the working projected CRS.
-        working_spatial_reference: Configured projected CRS for returned geometries.
-        datum_transformation: Explicit ArcGIS transformation when required.
+        spatial_filter: Valid AOI geometry in WGS 84 / EPSG:4326.
+        defer_eligibility: Retain evaluator fields and defer classification until after
+            exact cell intersections are known.
+        metadata: Previously loaded metadata for this network dataset.
 
     Yields:
         Edge records intersecting the AOI with eligible, restricted, or undetermined status.
@@ -238,14 +245,14 @@ def iter_network_edges(
         raise ValueError("spatial_filter must be a non-empty AOI polygon")
     if spatial_filter.pointCount == 0:
         raise ValueError("spatial_filter must be a non-empty AOI polygon")
-    if spatial_filter.spatialReference != working_spatial_reference:
-        raise ValueError(
-            "spatial_filter must already use the working spatial reference"
-        )
-    if working_spatial_reference.type != "Projected":
-        raise ValueError("working_spatial_reference must be projected")
+    output_spatial_reference = arcpy.SpatialReference(WGS84_CRS_NAME)
+    if (
+        spatial_filter.spatialReference.factoryCode
+        != output_spatial_reference.factoryCode
+    ):
+        raise ValueError("spatial_filter must use WGS 84 / EPSG:4326")
 
-    metadata = load_network_metadata(network_dataset_path)
+    metadata = metadata or load_network_metadata(network_dataset_path)
     travel_mode = metadata.travel_modes.get(travel_mode_name)
     if travel_mode is None:
         raise ValueError(
@@ -253,6 +260,20 @@ def iter_network_edges(
         )
 
     for source in metadata.edge_sources:
+        source_description = arcpy.Describe(source.feature_class_path)
+        source_spatial_reference = source_description.spatialReference
+        if (
+            source_spatial_reference is None
+            or source_spatial_reference.name == "Unknown"
+        ):
+            raise ValueError(
+                f"Network edge source '{source.name}' has an unknown spatial reference"
+            )
+        transformation = _best_available_datum_transformation(
+            source_spatial_reference,
+            output_spatial_reference,
+            source_description.extent,
+        )
         field_names = required_edge_fields(
             source.name, metadata.attributes, travel_mode
         )
@@ -261,25 +282,28 @@ def iter_network_edges(
             with arcpy.da.SearchCursor(
                 in_table=source.feature_class_path,
                 field_names=cursor_fields,
-                spatial_reference=working_spatial_reference,
-                datum_transformation=datum_transformation,
+                spatial_reference=output_spatial_reference,
+                datum_transformation=transformation,
                 spatial_filter=spatial_filter,
                 spatial_relationship="INTERSECTS",
             ) as cursor:
                 for row in cursor:
                     edge_fields = dict(zip(field_names, row[2:]))
-                    decision = classify_edge_directions(
-                        source.name,
-                        edge_fields,
-                        metadata.attributes,
-                        travel_mode,
-                    )
+                    decision = None
+                    if not defer_eligibility:
+                        decision = classify_edge_directions(
+                            source.name,
+                            edge_fields,
+                            metadata.attributes,
+                            travel_mode,
+                        )
                     yield NetworkEdgeRecord(
                         source_id=source.source_id,
                         source_oid=int(row[0]),
                         source_name=source.name,
                         geometry_working=row[1],
                         decision=decision,
+                        evaluator_fields=edge_fields,
                     )
         except arcpy.ExecuteError as exc:
             message = f"Could not read edge source '{source.name}' in '{network_dataset_path}': {arcpy.GetMessages(2)}"

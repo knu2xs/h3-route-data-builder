@@ -7,11 +7,15 @@ The Area of Interest defines the geometry scope for edge clipping and cell evalu
 | Attribute | Meaning | Validation |
 |---|---|---|
 | `aoi_geometry` | Non-empty polygonal geometry | Must be valid; do not silently repair |
-| `source_crs` | Declared CRS of AOI input | Required; unknown CRS is rejected |
-| `working_crs` | Configured projected CRS for topology and distance | Required, appropriate for AOI, recorded in run evidence |
-| `storage_crs` | Configured CRS for persisted GeoParquet geometries | Required and recorded in run evidence; storage transforms happen after measurement |
+| `source_crs` | CRS declared by AOI data metadata | Required; read from the AOI; unknown CRS is rejected; never caller-supplied |
+| `processing_crs` | WGS 84 / EPSG:4326 | Fixed for AOI, network, and H3 geometry; declared in GeoParquet PROJJSON metadata |
 
-The AOI and edge inputs are explicitly transformed to the working CRS. H3 boundaries are interpreted in H3's latitude/longitude coordinate order and transformed with GIS x/y order. Edge geometry outside the AOI is excluded before intersection and representative selection. Persisted cell, centroid, and representative geometries are projected to the configured storage CRS after all measurements are complete.
+AOI and network edge inputs are explicitly transformed to WGS 84 / EPSG:4326. When their geodetic
+datum differs, ArcPy `ListTransformations` receives the source extent and its first ranked result
+is used; the selected transformation is logged. If no transformation is available, processing
+fails. H3 boundaries are constructed directly in WGS84 using GIS x/y order. Edge geometry outside
+the AOI is excluded before intersection and representative selection. Centroid ranking and snap
+distance use geodesic measurements in meters. All persisted geometry remains in WGS 84 / EPSG:4326.
 
 ## Transportation Edge
 
@@ -21,10 +25,11 @@ An edge is an input network source feature eligible or ineligible under one trav
 |---|---|---|
 | `source_id` | Network Analyst network-source identifier | Must map to the selected network source |
 | `source_oid` | Source feature object ID | Stable for the network build; retained as evidence |
-| `geometry_working` | Edge portion within the AOI in working CRS | Multipart parts all evaluated |
+| `geometry_wgs84` | Edge portion within the AOI in WGS 84 / EPSG:4326 | Multipart parts all evaluated |
 | `eligibility_status` | Eligible, restricted, or undetermined | Undetermined fails closed |
 | `eligibility_reason` | Reason for status | Recorded for excluded edges |
 | `travel_direction` | Direction(s) permitted by selected mode/restrictions | Must not infer bidirectional access |
+| `source_crs` | CRS declared by network edge-source metadata | Required; unknown CRS is rejected; never caller-supplied |
 
 An edge is eligible only if its direction and restrictions permit travel under the selected configuration. Unknown or prohibited edges cannot establish a solvable cell.
 
@@ -36,8 +41,8 @@ One reconciled result row exists per canonical H3 ID across all input partitions
 |---|---|---|
 | `h3_id_hex` | Canonical H3 cell identifier | Unique after global reconciliation |
 | `resolution` | H3 resolution | Must equal configured resolution |
-| `cell_geometry` | Canonical cell polygon in working CRS | Valid polygon geometry |
-| `centroid_geometry` | Cell centroid in working CRS | Used only for deterministic representative ranking |
+| `cell_geometry` | Canonical cell polygon in WGS 84 / EPSG:4326 | Valid polygon geometry |
+| `centroid_geometry` | Cell centroid in WGS 84 / EPSG:4326 | Geodesic distance used for representative ranking |
 | `eligibility_status` | `solvable` or `ineligible` | Only `solvable` may enter later OD planning |
 | `eligibility_reason` | Primary decision reason | Required for every evaluated cell |
 | `intersecting_edge_count` | Unique eligible edge identities intersecting the cell | Zero for cells without eligible intersections |
@@ -70,15 +75,26 @@ A run captures the immutable policy context and lifecycle for a complete AOI eva
 | `input_fingerprint` | AOI, network, travel mode/restrictions, CRS, H3, eligibility policy, schema, and software identity |
 | `schema_version` | Eligibility-result and staging schema version |
 | `software_versions` | Python, ArcGIS Pro, H3, and package versions used by the run |
+| `execution_limits` | Effective limits, per-value `inferred`/`set` source, inference-policy version, and resource snapshot |
 | `expected_partition_keys` | Deterministically ordered input partitions planned for the run |
 | `partition_status` | `pending`, `processing`, `staged`, `reconciled`, or `failed` |
 | `part_key` | Stable logical identity for one bounded output part |
-| `part_row_count` | Rows in staged part; must not exceed configured per-part limit |
+| `part_row_count` | Rows in staged part; must not exceed resolved per-part limit |
 | `part_checksum` | Content checksum used for idempotent reconciliation |
 | `run_status` | `processing`, `failed_incomplete`, or `complete` |
-| `unique_solvable_cell_count` | Count checked against the required total-output hard cap |
+| `unique_solvable_cell_count` | Count checked against the resolved total-output hard cap |
 
-A run becomes `complete` only after every expected input partition and staged part reconciles, H3 IDs are globally deduplicated, and representatives are deterministic. A total-cap overflow or missing/unreconciled partition leaves `run_status=failed_incomplete`; staged parts are not exposed as a complete eligibility result.
+A run resolves positive execution limits before partitioning. Omitted values are inferred from
+available memory and output-volume free space; batch size is additionally bounded by candidate
+count. Policy version 1 uses 100 candidates per GiB available memory for batch size (bounded to
+100-2,000 and candidate count), 1,000 staged rows per 128 MiB (bounded to 500-50,000), and half
+the free output-volume bytes divided by 8 KiB per cell for the total cap (bounded to 1-5,000,000).
+Effective values, provenance, policy version, and resource snapshot are fingerprinted and stored
+in the manifest. Resume restores those values rather than probing current hardware.
+A run becomes `complete` only after every expected input partition and staged part reconciles, H3
+IDs are globally deduplicated, and representatives are deterministic. A total-cap overflow or
+missing/unreconciled partition leaves `run_status=failed_incomplete`; staged parts are not exposed
+as a complete eligibility result.
 
 ## Relationships and Invariants
 
@@ -87,4 +103,4 @@ A run becomes `complete` only after every expected input partition and staged pa
 - Many staging parts may contain evidence for the same H3 ID; reconciliation emits one result row per H3 ID.
 - A `solvable` result has at least one eligible intersecting edge and exactly one validated representative.
 - An `ineligible` result has a reason and cannot appear in the OD-planning handoff.
-- The required total-output cap counts unique `solvable` H3 IDs, not staging duplicates or ineligible audit rows.
+- The resolved total-output cap counts unique `solvable` H3 IDs, not staging duplicates or ineligible audit rows.

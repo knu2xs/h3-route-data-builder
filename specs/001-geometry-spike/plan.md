@@ -38,29 +38,39 @@ operations; H3 indexing and non-spatial reconciliation remain platform-portable 
 **Project Type**: Python package with an ArcGIS Pro Python toolbox entry point.
 
 **Performance Goals**: No wall-clock target is defined by the spec. Bound memory and staged-part
-size with explicit configuration; process all partitions serially and deterministically before
+size with optional resource-derived limits or explicit overrides; process all partitions serially
+and deterministically before
 any parallel implementation is considered.
 
-**Constraints**: Reject AOIs with unknown CRS; use configured area-appropriate working CRS and
-ArcPy projection capabilities with explicit datum transformation when required; do not repair
-invalid input silently. The H3 candidate cover is a superset only; exact ArcPy geometry
+**Constraints**: Reject spatial inputs with unknown CRS. Transform AOI and network edges to fixed
+WGS 84 / EPSG:4326 for all geometry operations; construct H3 polygons directly in that CRS.
+Measure representative and snap distances geodesically in meters. Declare WGS 84 / EPSG:4326 in
+each GeoParquet geometry column's PROJJSON metadata. For different geodetic datums, use the first
+ArcPy `ListTransformations` result ranked for the source extent; fail if no transformation is
+available. Infer execution limits from available physical memory, output-volume free space, and
+candidate count unless explicitly overridden. Log each resolved value and source, persist the
+resource snapshot/policy version, include resolved values in the behavior fingerprint, and restore
+limits from the run manifest when resuming. A cap
+breach leaves the run incomplete. Do not accept CRS or datum-transformation parameters and do not
+repair invalid input silently. The H3 candidate cover is a superset only; exact ArcPy geometry
 intersection is authoritative. Intersection acceptance must include nonempty zero-dimensional
 and one-dimensional ArcPy intersection results so point touches and coincident boundary segments
 are both counted. Do not expose partial staging as complete. Never pass a cell without an eligible
 intersecting edge and valid location to OD work.
 
 **Scale/Scope**: All eligible input partitions for an AOI, processed in bounded batches. A
-configured per-part limit triggers deterministic subdivision/retry. A required, distinct total
-hard cap counts unique solvable H3 IDs; exceeding it fails the run incomplete. OD candidate
+resolved per-part limit triggers deterministic subdivision/retry. A resolved distinct total hard
+cap counts unique solvable H3 IDs; exceeding it fails the run incomplete. OD candidate
 counts, solves, and published dataset scale are outside this feature.
 
 ## Constitution Check
 
 *Gate before Phase 0 research: PASS.*
 
-- **I. Explicit Semantics**: Pass. Working CRS, H3 resolution, travel mode/restrictions,
-  intersection policy, representative tie-breaks, tolerance, batch limits, and required total cap
-  are explicit inputs/configuration and recorded as run evidence.
+- **I. Explicit Semantics**: Pass. H3 resolution, travel mode/restrictions, intersection policy,
+  representative tie-breaks, tolerance, and run limits are either explicit overrides or
+  resource-inferred, and are recorded with their source as run evidence. Input CRS comes from
+  metadata; processing and output CRS are fixed WGS 84 / EPSG:4326.
 - **II. Builder ArcPy Geometry Boundary**: Pass after the builder-specific amendment. ArcPy geometry,
   reprojection, and network operations stay in network/geoprocessing modules; H3 indexing and
   non-spatial state/validation logic remain importable without ArcPy. The solver remains ArcPy-free.
@@ -72,10 +82,12 @@ counts, solves, and published dataset scale are outside this feature.
 - **V. Idempotent Resumability**: Pass. Partition/batch states, atomic part writes, and logical
   reconciliation support retry without duplicate committed cells.
 - **VI. Approximation Transparency**: Pass. No estimated distance/time or OD cost is produced.
-- **VII. Bounded Execution**: Pass. Per-part limits, recursive deterministic subdivision, and a
-  required total hard cap bound work/output; no silent truncation.
+- **VII. Bounded Execution**: Pass. Resource-inferred or explicitly overridden per-part limits,
+  recursive deterministic subdivision, and a resolved total hard cap bound work/output; no
+  silent truncation.
 - **VIII. Interoperability**: Pass for the eligibility handoff by preserving the existing
-  solvable-cell schema and CRS metadata. Final GeoParquet publication validation is out of scope.
+  solvable-cell schema and explicitly declaring fixed WGS 84 / EPSG:4326 PROJJSON metadata on every
+  geometry column. Final GeoParquet publication validation is out of scope.
 - **IX. Observable Operation**: Pass. Structured logs and durable partition/run states reconcile
   expected and completed work counts before completion.
 - **X. Testable Contracts**: Pass. Each acceptance scenario maps to portable H3/non-spatial tests
@@ -134,5 +146,5 @@ eligibility handoff is documented against, but does not alter, the shared data c
 ## Complexity Tracking
 
 No constitution violations after the builder-specific Principle II amendment. Every run requires
-a configured total solvable-cell hard cap in addition to per-part limits. No package dependencies
+a resolved total solvable-cell hard cap in addition to per-part limits. No package dependencies
 are added; ArcPy is supplied by ArcGIS Pro.
