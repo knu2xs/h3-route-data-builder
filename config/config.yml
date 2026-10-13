@@ -51,6 +51,7 @@ environments:
     network:
       travel_mode: null  # Required per build
       restrictions: []
+      prefilter_distance_error_bound_m: null  # Caller-asserted error bound; null retains all pairs
 
     eligibility:
       representative_policy: "nearest_centroid_then_source_id_oid_measure"
