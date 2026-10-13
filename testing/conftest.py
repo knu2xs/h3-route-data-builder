@@ -52,10 +52,15 @@ def arcpy_module():
 
 @pytest.fixture(scope="session")
 def real_network_dataset(arcpy_module):
-    """Return the configured real network dataset when ArcPy can resolve it."""
-    network_path = os.environ.get("H3_RDB_TEST_NETWORK")
-    if not network_path:
-        pytest.skip("H3_RDB_TEST_NETWORK is not configured")
+    """Return the Feature 001 StreetMap network or an explicit local override."""
+    network_path = os.environ.get(
+        "H3_RDB_TEST_NETWORK",
+        r"D:\data\ba_data\usa_2025\Data\StreetMap Premium Data"
+        r"\northamerica.geodatabase\main.Routing\main.Routing_ND",
+    )
     if not arcpy_module.Exists(network_path):
-        pytest.skip(f"ArcPy cannot resolve network dataset: {network_path}")
+        pytest.skip(
+            "ArcPy cannot resolve the configured real network dataset: "
+            f"{network_path}"
+        )
     return network_path

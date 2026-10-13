@@ -92,6 +92,8 @@ arcgis/.backups
 
 # make sure the environment is not included
 env/
+.venv/
+venv/
 
 # exclude the docs build directory
 docs/
