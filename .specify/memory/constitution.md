@@ -1,9 +1,12 @@
 <!--
 Sync Impact Report
-- Version change: 1.2.0 -> 1.3.0
-- Added Principle XVII for resource-inferred execution limits, provenance, and resume stability.
-- Principle XVI remains the Pro XML help requirement; principles II and XI-XVII are builder-specific.
-- No solver constitution or dependent template changes.
+- Version change: 2.0.0 -> 2.0.1
+- Principle VIII: removed GeoPandas as a required reader and prohibited GeoPandas use in this builder;
+  specified ArcGIS GeoAccessor and DuckDB Spatial as the spatial-operation paths, and clarified
+  that Arrow/PyArrow remains approved for columnar schemas, interchange, Parquet I/O, and metadata.
+- Reclassified Principle VIII as builder-specific; no solver constitution change is required.
+- Technology Constraints now distinguish Arrow/Parquet data handling from spatial operations.
+- Follow-up completed: Feature 004's reader acceptance criteria and assumptions now omit GeoPandas.
 -->
 
 # H3 Route Data Builder Constitution
@@ -12,8 +15,8 @@ The H3 Route Data Builder is the ArcGIS Pro / ArcPy half of a two-project system
 sparse, precomputed origin-destination (OD) network cost dataset over canonical H3 cells and
 publishes it as Parquet/GeoParquet for the ArcPy-free
 [h3-route-solver](https://github.com/knu2xs/h3-route-solver). Principles I-X are shared verbatim in
-intent with the solver except Principle II, which is builder-specific; principles XI-XVII also apply
-to this project only.
+intent with the solver except Principles II and VIII, which are builder-specific; principles
+XI-XVII also apply to this project only.
 
 ## Core Principles (Shared Except Where Noted)
 
@@ -87,13 +90,18 @@ Unbounded loops over cells, rings, or candidates are prohibited.
 
 *Rationale:* predictable memory, runtime, and licensing behavior.
 
-### VIII. Interoperability
+### VIII. Builder Interoperability
 
 Published spatial files MUST validate against the selected GeoParquet specification (1.0+),
 including geometry metadata, CRS, and bbox/covering columns, and MUST be readable by PyArrow,
-DuckDB, and GeoPandas.
+and DuckDB. GeoPandas MUST NOT be used in this project, including in production code, tests, or
+tooling. Arrow/PyArrow MAY be used for columnar schemas, data interchange, Parquet/GeoParquet
+serialization, and file/metadata validation; these uses are distinct from spatial DataFrame
+operations. When spatial operations use Pandas, the ArcGIS GeoAccessor MUST be used; large-data
+spatial processing MUST use DuckDB with its spatial extension.
 
-*Rationale:* the dataset is a contract consumed outside ArcGIS.
+*Rationale:* the dataset remains interoperable through portable Arrow/GeoParquet readers and writers,
+while spatial operations follow the project's ArcGIS and DuckDB toolchain.
 
 ### IX. Observable Operation
 
@@ -195,6 +203,10 @@ auditable settings, and deterministic recovery.
 - Python version matches the ArcGIS Pro `arcgispro-py3` environment (currently 3.13; minimum 3.11).
 - Environment is a clone of `arcgispro-py3` plus `environment.yml` (`make env`).
 - Core libraries: ArcPy + Network Analyst, `h3` (v4 API), `pyarrow`, `pandas`, `duckdb`.
+- GeoPandas MUST NOT be added as a dependency or used in source code, tests, or tooling. Use
+  Arrow/PyArrow for columnar data schemas, interchange, and Parquet/GeoParquet I/O where appropriate.
+  Use ArcGIS GeoAccessor for spatial Pandas workflows and DuckDB with the spatial extension for
+  large spatial datasets.
 - `src/` layout; package `h3_route_data_builder`; ArcGIS Pro tools live in `arcgis/*.pyt` and
   delegate all logic to the package.
 - Adding dependencies MUST be flagged in the plan and justified.
@@ -217,14 +229,14 @@ auditable settings, and deterministic recovery.
 
 - This constitution supersedes other practice documents; `AGENTS.md` provides runtime coding
   guidance subordinate to it.
-- Principles I and III-X are shared in intent with `h3-route-solver`; Principle II and principles
-  XI-XVII are builder-specific. Builder-specific amendments do not change the solver constitution.
-  Changes to the shared principles MUST be mirrored in the solver constitution in the same release
-  cycle.
+- Principles I and III-VII and IX-X are shared in intent with `h3-route-solver`; Principles II and
+  VIII and principles XI-XVII are builder-specific. Builder-specific amendments do not change the
+  solver constitution. Changes to the shared principles MUST be mirrored in the solver constitution
+  in the same release cycle.
 - Amendments require a pull request describing the change, rationale, and migration impact, and
   updating dependent templates and docs.
 - Versioning: MAJOR for removed/redefined principles, MINOR for added principles or materially
   expanded guidance, PATCH for clarifications.
 - Reviews MUST verify compliance; unjustified complexity is rejected.
 
-**Version**: 1.3.0 | **Ratified**: 2026-10-06 | **Last Amended**: 2026-10-08
+**Version**: 2.0.1 | **Ratified**: 2026-10-06 | **Last Amended**: 2026-10-13
