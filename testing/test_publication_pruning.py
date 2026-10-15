@@ -1,6 +1,7 @@
 """Origin partition and pruning tests."""
 
 import pyarrow as pa
+import pytest
 
 from h3_route_data_builder.publication.partition import read_origin_facts
 from h3_route_data_builder.publication.compact import compact_publication
@@ -17,8 +18,8 @@ def test_origin_partition_reads_only_the_selected_origin(temp_dir) -> None:
     rows.append(
         {
             **route,
-            "origin_h3_id_hex": route["destination_h3_id_hex"],
-            "destination_h3_id_hex": route["origin_h3_id_hex"],
+            "origin_h3_id": route["destination_h3_id"],
+            "destination_h3_id": route["origin_h3_id"],
             "origin_representative_snap_distance_m": route[
                 "destination_representative_snap_distance_m"
             ],
@@ -36,11 +37,11 @@ def test_origin_partition_reads_only_the_selected_origin(temp_dir) -> None:
         partition_by_origin=True,
     )
 
-    selected_origin = "8928308280fffff"
+    selected_origin = 617700169958293503
     selected, files_read = read_origin_facts(parts, selected_origin)
 
     assert files_read == 1
-    assert set(selected.column("origin_h3_id_hex").to_pylist()) == {selected_origin}
+    assert set(selected.column("origin_h3_id").to_pylist()) == {selected_origin}
     assert len(parts) == 2
 
 
@@ -59,14 +60,30 @@ def test_fact_parts_obey_the_configured_row_limit(temp_dir) -> None:
     assert all(part.row_count <= 1 for part in parts)
 
 
+@pytest.mark.parametrize("origin", ["8928308280fffff", "617700169958293503", True, 1.0, None])
+def test_origin_pruning_rejects_noncanonical_api_input(origin: object) -> None:
+    with pytest.raises(ValueError, match="H3"):
+        read_origin_facts([], origin)
+
+
+def test_origin_identity_comes_from_typed_columns_not_directory_labels(temp_dir) -> None:
+    _, facts = make_publication_tables()
+    path = temp_dir / "origin_h3_id=0" / "misleading-label.parquet"
+    part = write_table(facts, path, table_name="od_facts")
+    origin = facts.column("origin_h3_id")[0].as_py()
+    selected, count = read_origin_facts([part], origin)
+    assert count == 1
+    assert set(selected.column("origin_h3_id").to_pylist()) == {origin}
+
+
 def test_origin_pruning_is_preserved_after_publication_compaction(temp_dir) -> None:
     dimension, facts = make_publication_tables()
     rows = facts.to_pylist()
     route = next(row for row in rows if row["solve_status"] == "solved")
     reverse = {
         **route,
-        "origin_h3_id_hex": route["destination_h3_id_hex"],
-        "destination_h3_id_hex": route["origin_h3_id_hex"],
+        "origin_h3_id": route["destination_h3_id"],
+        "destination_h3_id": route["origin_h3_id"],
         "origin_representative_snap_distance_m": route[
             "destination_representative_snap_distance_m"
         ],
@@ -76,8 +93,8 @@ def test_origin_pruning_is_preserved_after_publication_compaction(temp_dir) -> N
         "work_item_id": "work-reverse",
     }
     facts = type(facts).from_pylist([*rows, reverse], schema=facts.schema)
-    origin = "8928308280fffff"
-    destination = "8928308280bffff"
+    origin = 617700169958293503
+    destination = 617700169958031359
     root = temp_dir / "store"
     source = publish_dataset(
         root,
@@ -100,7 +117,7 @@ def test_origin_pruning_is_preserved_after_publication_compaction(temp_dir) -> N
     selected, files_read = read_origin_facts(parts, origin)
 
     assert files_read == 1
-    assert set(selected.column("origin_h3_id_hex").to_pylist()) == {origin}
+    assert set(selected.column("origin_h3_id").to_pylist()) == {origin}
     assert len(parts) == 2
 
 

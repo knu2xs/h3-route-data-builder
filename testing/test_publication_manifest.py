@@ -16,8 +16,8 @@ def test_manifest_records_versions_counts_provenance_and_part_integrity(
         "solvable_cells",
         cell_path,
         row_count=3,
-        checksum="a" * 64,
-        schema_version="1.0.0",
+        checksum=619056559456255999 * 64,
+        schema_version="2.0.0",
         extent=(-123.0, 46.0, -121.0, 48.0),
     )
     partition = build_partition_manifest("solvable_cells", [part])
@@ -42,14 +42,10 @@ def test_manifest_records_versions_counts_provenance_and_part_integrity(
     assert document["status"] == "complete"
     assert document["geoparquet_version"] == "1.1.0"
     assert document["schema_versions"] == {
-        "dataset": "1.0.0",
-        "solvable_cells": "1.0.0",
-        "od_facts": "1.0.0",
+        "dataset": "2.0.0",
+        "solvable_cells": "2.0.0",
+        "od_facts": "2.0.0",
     }
     assert document["partition_manifests"][0]["row_count"] == 3
-    assert document["partition_manifests"][0]["parts"][0]["location"] == (
-        "solvable_cells.parquet"
-    )
-    assert (
-        document["partition_manifests"][0]["parts"][0]["checksum_algorithm"] == "sha256"
-    )
+    assert document["partition_manifests"][0]["parts"][0]["location"] == ("solvable_cells.parquet")
+    assert document["partition_manifests"][0]["parts"][0]["checksum_algorithm"] == "sha256"

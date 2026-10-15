@@ -2,6 +2,7 @@
 
 from collections.abc import Callable, Iterable, Mapping
 from typing import Any
+from h3.api.basic_int import get_resolution
 
 from .cells import canonical_h3_ids
 from .models import (
@@ -18,7 +19,7 @@ logger = get_logger(__name__, level="DEBUG", add_stream_handler=False)
 
 
 def build_geometry_candidates(
-    cell_geometries: Mapping[str, Any],
+    cell_geometries: Mapping[int, Any],
     network_edges: Iterable[Any],
     aoi_geometry: Any,
     resolution: int,
@@ -49,9 +50,15 @@ def build_geometry_candidates(
     import arcpy
 
     canonical_ids = canonical_h3_ids(cell_geometries)
-    canonical_geometries = {
-        cell_id.lower(): geometry for cell_id, geometry in cell_geometries.items()
-    }
+    if (
+        type(resolution) is not int
+        or not 0 <= resolution <= 15
+        or any(get_resolution(cell_id) != resolution for cell_id in canonical_ids)
+    ):
+        message = "Cell resolution does not match configured eligibility resolution"
+        logger.error(message)
+        raise ValueError(message)
+    canonical_geometries = {cell_id: geometry for cell_id, geometry in cell_geometries.items()}
     ordered_edges = sorted(
         network_edges,
         key=lambda edge: (edge.source_id, edge.source_oid, edge.source_name),
@@ -66,9 +73,7 @@ def build_geometry_candidates(
         ordered_edges,
     )
     clipped_edges: dict[int, Any] = {}
-    geometric_matches: dict[str, list[tuple[int, Any]]] = {
-        cell_id: [] for cell_id in canonical_ids
-    }
+    geometric_matches: dict[int, list[tuple[int, Any]]] = {cell_id: [] for cell_id in canonical_ids}
     intersecting_edge_indexes: set[int] = set()
     for cell_index, edge_index in spatial_pairs:
         cell_id = canonical_ids[cell_index]
@@ -125,7 +130,7 @@ def build_geometry_candidates(
             )
         candidates.append(
             CellGeometryCandidate(
-                h3_id_hex=cell_id,
+                h3_id=cell_id,
                 resolution=resolution,
                 cell_geometry=cell_geometry,
                 centroid_geometry=arcpy.PointGeometry(
@@ -140,9 +145,7 @@ def build_geometry_candidates(
                 ),
             )
         )
-    eligible_count = sum(
-        candidate.has_eligible_intersection for candidate in candidates
-    )
+    eligible_count = sum(candidate.has_eligible_intersection for candidate in candidates)
     logger.info(
         "Spatially matched %s cell-edge pairs; %s edges intersect cells within the AOI; "
         "built geometry evidence for %s cells with %s eligible cells",
@@ -155,8 +158,8 @@ def build_geometry_candidates(
 
 
 def _spatial_join_cell_edge_pairs(
-    canonical_ids: list[str],
-    cell_geometries: Mapping[str, Any],
+    canonical_ids: list[int],
+    cell_geometries: Mapping[int, Any],
     network_edges: list[Any],
 ) -> list[tuple[int, int]]:
     """Use ArcGIS's spatial index to find candidate cell-edge pairs."""
@@ -213,12 +216,7 @@ def _spatial_join_cell_edge_pairs(
             pair_features,
             ["cell_index", "edge_index"],
         ) as cursor:
-            return sorted(
-                {
-                    (int(cell_index), int(edge_index))
-                    for cell_index, edge_index in cursor
-                }
-            )
+            return sorted({(int(cell_index), int(edge_index)) for cell_index, edge_index in cursor})
     finally:
         for dataset in datasets:
             if arcpy.Exists(dataset):
@@ -270,12 +268,8 @@ def build_cell_eligibility_result(
             key=lambda item: (item.source_id, item.source_oid),
         )
     )
-    unique_edge_evidence = {
-        (edge.source_id, edge.source_oid): edge for edge in edge_evidence
-    }
-    edge_evidence = tuple(
-        unique_edge_evidence[key] for key in sorted(unique_edge_evidence)
-    )
+    unique_edge_evidence = {(edge.source_id, edge.source_oid): edge for edge in edge_evidence}
+    edge_evidence = tuple(unique_edge_evidence[key] for key in sorted(unique_edge_evidence))
     ineligible_reason: str | None = None
     if not edge_evidence:
         ineligible_reason = "no eligible intersecting edge within AOI"
@@ -285,23 +279,14 @@ def build_cell_eligibility_result(
         representative.source_id,
         representative.source_oid,
     ) not in unique_edge_evidence:
-        ineligible_reason = (
-            "representative does not match an eligible intersecting edge"
-        )
+        ineligible_reason = "representative does not match an eligible intersecting edge"
     elif representative.snap_distance_m > snap_tolerance_m:
         ineligible_reason = "representative snap distance exceeds configured tolerance"
 
-    status = (
-        EligibilityStatus.INELIGIBLE
-        if ineligible_reason
-        else EligibilityStatus.SOLVABLE
-    )
-    reason = (
-        ineligible_reason
-        or "eligible edge intersects cell and representative is validated"
-    )
+    status = EligibilityStatus.INELIGIBLE if ineligible_reason else EligibilityStatus.SOLVABLE
+    reason = ineligible_reason or "eligible edge intersects cell and representative is validated"
     result = CellEligibilityResult(
-        h3_id_hex=candidate.h3_id_hex,
+        h3_id=candidate.h3_id,
         resolution=candidate.resolution,
         eligibility_status=status,
         eligibility_reason=reason,
@@ -314,11 +299,7 @@ def build_cell_eligibility_result(
         centroid_geometry=candidate.centroid_geometry,
     )
     if result.eligibility_status == EligibilityStatus.INELIGIBLE:
-        logger.warning(
-            "H3 cell %s excluded: %s", result.h3_id_hex, result.eligibility_reason
-        )
+        logger.warning("H3 cell %s excluded: %s", result.h3_id, result.eligibility_reason)
     else:
-        logger.debug(
-            "H3 cell %s has validated representative evidence", result.h3_id_hex
-        )
+        logger.debug("H3 cell %s has validated representative evidence", result.h3_id)
     return result

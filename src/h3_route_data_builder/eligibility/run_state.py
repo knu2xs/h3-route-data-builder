@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .models import EligibilityRunState, PartitionStatus, RunStatus
+from .fingerprint import ELIGIBILITY_SCHEMA_VERSION
 from h3_route_data_builder.utils import get_logger
 
 logger = get_logger(__name__, level="DEBUG", add_stream_handler=False)
@@ -91,9 +92,7 @@ def transition_partition(
     )
 
 
-def finalize_run(
-    run_state: EligibilityRunState, unique_solvable_cell_count: int
-) -> None:
+def finalize_run(run_state: EligibilityRunState, unique_solvable_cell_count: int) -> None:
     """Mark a run complete only after reconciliation and hard-cap validation.
 
     Args:
@@ -107,14 +106,9 @@ def finalize_run(
         raise ValueError(f"Cannot finalize a {run_state.status.value} run")
     if unique_solvable_cell_count < 0:
         raise ValueError("unique_solvable_cell_count must be non-negative")
-    if any(
-        status != PartitionStatus.RECONCILED
-        for status in run_state.partition_status.values()
-    ):
+    if any(status != PartitionStatus.RECONCILED for status in run_state.partition_status.values()):
         run_state.status = RunStatus.FAILED_INCOMPLETE
-        logger.warning(
-            "Run %s cannot complete with unreconciled partitions", run_state.run_id
-        )
+        logger.warning("Run %s cannot complete with unreconciled partitions", run_state.run_id)
         raise ValueError("Cannot complete a run with unreconciled partitions")
 
     run_state.unique_solvable_cell_count = unique_solvable_cell_count
@@ -135,9 +129,7 @@ def finalize_run(
     )
 
 
-def save_run_state(
-    path: str | os.PathLike[str], run_state: EligibilityRunState
-) -> None:
+def save_run_state(path: str | os.PathLike[str], run_state: EligibilityRunState) -> None:
     """Atomically persist run state to a caller-selected durable path.
 
     Args:
@@ -147,12 +139,12 @@ def save_run_state(
     state_path = Path(path)
     state_path.parent.mkdir(parents=True, exist_ok=True)
     payload: dict[str, Any] = {
+        "schema_version": ELIGIBILITY_SCHEMA_VERSION,
         "run_id": run_state.run_id,
         "expected_partition_keys": list(run_state.expected_partition_keys),
         "total_output_hard_cap": run_state.total_output_hard_cap,
         "partition_status": {
-            key: status.value
-            for key, status in sorted(run_state.partition_status.items())
+            key: status.value for key, status in sorted(run_state.partition_status.items())
         },
         "status": run_state.status.value,
         "unique_solvable_cell_count": run_state.unique_solvable_cell_count,
@@ -175,9 +167,12 @@ def load_run_state(path: str | os.PathLike[str]) -> EligibilityRunState:
         Reconstructed eligibility run state.
     """
     payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    if payload.get("schema_version") != ELIGIBILITY_SCHEMA_VERSION:
+        message = "Incompatible eligibility run state; choose a fresh output location and rebuild"
+        logger.error(message)
+        raise ValueError(message)
     partition_status = {
-        key: PartitionStatus(value)
-        for key, value in payload["partition_status"].items()
+        key: PartitionStatus(value) for key, value in payload["partition_status"].items()
     }
     return EligibilityRunState(
         run_id=payload["run_id"],

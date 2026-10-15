@@ -20,7 +20,7 @@ logger = get_logger(__name__, level="DEBUG", add_stream_handler=False)
 
 _ALONG: str = "AlongDigitizedDirection"
 _AGAINST: str = "AgainstDigitizedDirection"
-_DIRECTIONS: tuple[str, str] = (_ALONG, _AGAINST)
+_DIRECTIONS: tuple[int, int] = (_ALONG, _AGAINST)
 _FIELD_TOKEN = re.compile(r"!([A-Za-z_][A-Za-z0-9_]*)!")
 _PROHIBITED_USAGE: set[int | str] = {-1, "-1", "PROHIBITED"}
 _NONBLOCKING_USAGE: set[int | str] = {
@@ -109,9 +109,7 @@ def load_network_metadata(network_dataset_path: str) -> NetworkDatasetMetadata:
         RuntimeError: If ArcPy cannot describe the network or its travel modes.
     """
     if not arcpy.Exists(network_dataset_path):
-        raise ValueError(
-            f"ArcPy cannot resolve network dataset: {network_dataset_path}"
-        )
+        raise ValueError(f"ArcPy cannot resolve network dataset: {network_dataset_path}")
     try:
         description = arcpy.Describe(network_dataset_path)
         edge_sources: list[NetworkEdgeSource] = []
@@ -246,26 +244,18 @@ def iter_network_edges(
     if spatial_filter.pointCount == 0:
         raise ValueError("spatial_filter must be a non-empty AOI polygon")
     output_spatial_reference = arcpy.SpatialReference(WGS84_CRS_NAME)
-    if (
-        spatial_filter.spatialReference.factoryCode
-        != output_spatial_reference.factoryCode
-    ):
+    if spatial_filter.spatialReference.factoryCode != output_spatial_reference.factoryCode:
         raise ValueError("spatial_filter must use WGS 84 / EPSG:4326")
 
     metadata = metadata or load_network_metadata(network_dataset_path)
     travel_mode = metadata.travel_modes.get(travel_mode_name)
     if travel_mode is None:
-        raise ValueError(
-            f"Unknown travel mode '{travel_mode_name}' for network dataset"
-        )
+        raise ValueError(f"Unknown travel mode '{travel_mode_name}' for network dataset")
 
     for source in metadata.edge_sources:
         source_description = arcpy.Describe(source.feature_class_path)
         source_spatial_reference = source_description.spatialReference
-        if (
-            source_spatial_reference is None
-            or source_spatial_reference.name == "Unknown"
-        ):
+        if source_spatial_reference is None or source_spatial_reference.name == "Unknown":
             raise ValueError(
                 f"Network edge source '{source.name}' has an unknown spatial reference"
             )
@@ -274,9 +264,7 @@ def iter_network_edges(
             output_spatial_reference,
             source_description.extent,
         )
-        field_names = required_edge_fields(
-            source.name, metadata.attributes, travel_mode
-        )
+        field_names = required_edge_fields(source.name, metadata.attributes, travel_mode)
         cursor_fields = ["OID@", "SHAPE@", *field_names]
         try:
             with arcpy.da.SearchCursor(
@@ -400,10 +388,7 @@ def classify_edge_directions(
         Eligibility status, allowed directions, and decision reason.
     """
     direction_attribute = network_attributes.get("Travel Direction")
-    if (
-        direction_attribute is None
-        or direction_attribute.usage_type.casefold() != "descriptor"
-    ):
+    if direction_attribute is None or direction_attribute.usage_type.casefold() != "descriptor":
         return EdgeEligibilityDecision(
             "undetermined", (), "Travel Direction attribute is unavailable"
         )
@@ -470,9 +455,7 @@ def classify_edge_directions(
     if allowed_directions:
         reason = "eligible in at least one permitted travel direction"
         return EdgeEligibilityDecision("eligible", tuple(allowed_directions), reason)
-    return EdgeEligibilityDecision(
-        "restricted", (), "all travel directions are prohibited"
-    )
+    return EdgeEligibilityDecision("restricted", (), "all travel directions are prohibited")
 
 
 def _restriction_usage(travel_mode: dict[str, Any]) -> dict[str, Any] | None:
@@ -501,8 +484,7 @@ def _evaluate_attribute_direction(
     evaluators = [
         evaluator
         for evaluator in attribute.evaluators
-        if evaluator.source_name == edge_source_name
-        and evaluator.edge_direction == direction
+        if evaluator.source_name == edge_source_name and evaluator.edge_direction == direction
     ]
     if not evaluators:
         evaluator_type = attribute.default_edge_evaluator_type.casefold()
@@ -524,7 +506,5 @@ def _evaluate_attribute_direction(
     try:
         return evaluate_field_expression(evaluator.expression, fields), None
     except ValueError as exc:
-        logger.warning(
-            "Could not evaluate %s in %s: %s", attribute.name, direction, exc
-        )
+        logger.warning("Could not evaluate %s in %s: %s", attribute.name, direction, exc)
         return False, f"{attribute.name}: {exc}"

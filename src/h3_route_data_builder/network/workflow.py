@@ -22,7 +22,10 @@ from h3_route_data_builder.eligibility.engine import (
     build_cell_eligibility_result,
     build_geometry_candidates,
 )
-from h3_route_data_builder.eligibility.fingerprint import build_input_fingerprint
+from h3_route_data_builder.eligibility.fingerprint import (
+    ELIGIBILITY_SCHEMA_VERSION,
+    build_input_fingerprint,
+)
 from h3_route_data_builder.eligibility.limits import (
     EXECUTION_LIMIT_POLICY_VERSION,
     ExecutionLimits,
@@ -129,9 +132,7 @@ def run_geometry_eligibility(
         )
     mode_restrictions = tuple(
         sorted(
-            network_metadata.travel_modes[settings.travel_mode].get(
-                "restrictionAttributeNames", []
-            )
+            network_metadata.travel_modes[settings.travel_mode].get("restrictionAttributeNames", [])
         )
     )
     if settings.restrictions != mode_restrictions:
@@ -139,13 +140,10 @@ def run_geometry_eligibility(
             "network.restrictions must match the selected travel mode's restrictionAttributeNames"
         )
 
-    candidate_ids = canonical_h3_ids(
-        candidate_h3_cells_for_aoi(aoi_wgs84, settings.h3_resolution)
-    )
+    candidate_ids = canonical_h3_ids(candidate_h3_cells_for_aoi(aoi_wgs84, settings.h3_resolution))
     network_fingerprint = _network_metadata_fingerprint(network_metadata)
     aoi_fingerprint = hashlib.sha256(
-        bytes(aoi_source_geometry.WKB)
-        + source_spatial_reference.exportToString().encode("utf-8")
+        bytes(aoi_source_geometry.WKB) + source_spatial_reference.exportToString().encode("utf-8")
     ).hexdigest()
     software_versions = {
         "python": platform.python_version(),
@@ -160,12 +158,10 @@ def run_geometry_eligibility(
         restrictions=settings.restrictions,
         h3_resolution=settings.h3_resolution,
         eligibility_policy=_policy_payload(settings),
-        schema_version="1",
+        schema_version=ELIGIBILITY_SCHEMA_VERSION,
         software_versions=software_versions,
     )
-    run_directory = Path(output_directory) / (
-        f"eligibility-{input_identity_fingerprint[:20]}"
-    )
+    run_directory = Path(output_directory) / (f"eligibility-{input_identity_fingerprint[:20]}")
     run_directory.mkdir(parents=True, exist_ok=True)
     state_path = run_directory / "run-state.json"
     manifest_path = run_directory / "run-manifest.json"
@@ -201,9 +197,7 @@ def run_geometry_eligibility(
             getattr(execution_limits, f"{limit_name}_source"),
             "; reused from existing run" if manifest is not None else "",
         )
-    logger.info(
-        "Execution limit inference policy version %s", EXECUTION_LIMIT_POLICY_VERSION
-    )
+    logger.info("Execution limit inference policy version %s", EXECUTION_LIMIT_POLICY_VERSION)
     if execution_limits.resource_snapshot is not None:
         logger.info(
             "Limit inference resources: available memory=%s bytes, output-volume free=%s bytes",
@@ -221,37 +215,32 @@ def run_geometry_eligibility(
             **_policy_payload(settings),
             "execution_limits": execution_limits.to_manifest(),
         },
-        schema_version="1",
+        schema_version=ELIGIBILITY_SCHEMA_VERSION,
         software_versions=software_versions,
     )
     run_id = fingerprint[:20]
     partition_keys = [
         f"partition-{batch_index:06d}"
         for batch_index in range(
-            (len(candidate_ids) + execution_limits.batch_size - 1)
-            // execution_limits.batch_size
+            (len(candidate_ids) + execution_limits.batch_size - 1) // execution_limits.batch_size
         )
     ]
 
     if run_state is not None:
         if manifest is None:
             raise RuntimeError("Existing run state has no manifest")
-        if run_state.run_id != run_id or run_state.expected_partition_keys != tuple(
-            partition_keys
-        ):
-            raise ValueError(
-                "Existing run state does not match this AOI/network/configuration"
-            )
+        if run_state.run_id != run_id or run_state.expected_partition_keys != tuple(partition_keys):
+            raise ValueError("Existing run state does not match this AOI/network/configuration")
         if manifest.get("build_fingerprint") != fingerprint:
             raise ValueError("Existing run manifest fingerprint does not match limits")
         if manifest.get("expected_partition_keys") != partition_keys:
             raise ValueError("Existing run manifest has different expected partitions")
         if run_state.status == RunStatus.COMPLETE:
+            for partition_key in partition_keys:
+                _verify_partition_parts(manifest, partition_key)
             return _build_summary(run_state, run_directory, manifest_path)
         if run_state.status == RunStatus.FAILED_INCOMPLETE:
-            raise ValueError(
-                "This eligibility run previously failed and is not resumable"
-            )
+            raise ValueError("This eligibility run previously failed and is not resumable")
     else:
         run_state = create_run_state(
             run_id,
@@ -259,6 +248,7 @@ def run_geometry_eligibility(
             execution_limits.total_output_hard_cap,
         )
         manifest = {
+            "schema_version": ELIGIBILITY_SCHEMA_VERSION,
             "run_id": run_id,
             "run_directory": str(run_directory),
             "build_fingerprint": fingerprint,
@@ -282,9 +272,7 @@ def run_geometry_eligibility(
         _write_json_atomic(manifest_path, manifest)
 
     if run_state is None or manifest is None:
-        raise RuntimeError(
-            "Run state and manifest must be initialized before processing"
-        )
+        raise RuntimeError("Run state and manifest must be initialized before processing")
 
     all_result_count = 0
     solvable_count = 0
@@ -306,22 +294,16 @@ def run_geometry_eligibility(
                 continue
             if current_status == PartitionStatus.STAGED:
                 _verify_partition_parts(manifest, partition_key)
-                transition_partition(
-                    run_state, partition_key, PartitionStatus.RECONCILED
-                )
+                transition_partition(run_state, partition_key, PartitionStatus.RECONCILED)
                 save_run_state(state_path, run_state)
                 summary = manifest.get("partition_summaries", {}).get(partition_key)
                 if summary is None:
-                    raise ValueError(
-                        f"Missing run summary for staged partition {partition_key}"
-                    )
+                    raise ValueError(f"Missing run summary for staged partition {partition_key}")
                 all_result_count += int(summary["cell_result_count"])
                 solvable_count += int(summary["solvable_cell_count"])
                 continue
             if current_status in {PartitionStatus.PENDING, PartitionStatus.FAILED}:
-                transition_partition(
-                    run_state, partition_key, PartitionStatus.PROCESSING
-                )
+                transition_partition(run_state, partition_key, PartitionStatus.PROCESSING)
                 save_run_state(state_path, run_state)
 
             batch_ids = candidate_ids[start : start + execution_limits.batch_size]
@@ -379,13 +361,11 @@ def run_geometry_eligibility(
             policy_evidence["execution_limits"] = execution_limits.to_manifest()
             representative_candidates_by_cell = {}
             for candidate in geometry_candidates:
-                representative_candidates_by_cell[candidate.h3_id_hex] = (
-                    rank_representative_candidates(
-                        candidate.h3_id_hex,
-                        candidate.centroid_geometry,
-                        candidate.intersecting_edges,
-                        settings.representative_snap_tolerance_m,
-                    )
+                representative_candidates_by_cell[candidate.h3_id] = rank_representative_candidates(
+                    candidate.h3_id,
+                    candidate.centroid_geometry,
+                    candidate.intersecting_edges,
+                    settings.representative_snap_tolerance_m,
                 )
             location_started = perf_counter()
             representatives = locate_representative_candidates_by_cell(
@@ -396,10 +376,7 @@ def run_geometry_eligibility(
             )
             logger.info(
                 "Located %s representative candidates for %s cells in %.2f seconds",
-                sum(
-                    len(candidates)
-                    for candidates in representative_candidates_by_cell.values()
-                ),
+                sum(len(candidates) for candidates in representative_candidates_by_cell.values()),
                 len(representative_candidates_by_cell),
                 perf_counter() - location_started,
             )
@@ -408,7 +385,7 @@ def run_geometry_eligibility(
                 results.append(
                     build_cell_eligibility_result(
                         candidate,
-                        representatives.get(candidate.h3_id_hex),
+                        representatives.get(candidate.h3_id),
                         settings.representative_snap_tolerance_m,
                         policy_evidence,
                         fingerprint,
@@ -437,9 +414,7 @@ def run_geometry_eligibility(
                 for staged in staged_parts
             ]
             manifest["parts"] = [
-                part
-                for part in manifest["parts"]
-                if part["partition_key"] != partition_key
+                part for part in manifest["parts"] if part["partition_key"] != partition_key
             ] + part_entries
             batch_solvable_count = sum(
                 result.eligibility_status.value == "solvable" for result in results
@@ -472,9 +447,7 @@ def run_geometry_eligibility(
                 manifest["failure_reason"] = "total output hard cap exceeded"
                 save_run_state(state_path, run_state)
                 _write_json_atomic(manifest_path, manifest)
-                raise ValueError(
-                    "Unique solvable H3 cell count exceeds total output hard cap"
-                )
+                raise ValueError("Unique solvable H3 cell count exceeds total output hard cap")
 
         finalize_run(run_state, solvable_count)
         save_run_state(state_path, run_state)
@@ -485,14 +458,10 @@ def run_geometry_eligibility(
     except Exception as exc:
         if run_state.status == RunStatus.PROCESSING:
             failed_partition = locals().get("partition_key")
-            if (
-                failed_partition in run_state.partition_status
-                and run_state.partition_status[failed_partition]
-                in {PartitionStatus.PROCESSING, PartitionStatus.STAGED}
-            ):
-                transition_partition(
-                    run_state, failed_partition, PartitionStatus.FAILED
-                )
+            if failed_partition in run_state.partition_status and run_state.partition_status[
+                failed_partition
+            ] in {PartitionStatus.PROCESSING, PartitionStatus.STAGED}:
+                transition_partition(run_state, failed_partition, PartitionStatus.FAILED)
             save_run_state(state_path, run_state)
         manifest["run_status"] = run_state.status.value
         manifest["failure_reason"] = str(exc)
@@ -514,8 +483,7 @@ def run_geometry_eligibility(
         run_status=run_state.status.value,
         expected_partition_count=len(partition_keys),
         reconciled_partition_count=sum(
-            status == PartitionStatus.RECONCILED
-            for status in run_state.partition_status.values()
+            status == PartitionStatus.RECONCILED for status in run_state.partition_status.values()
         ),
         cell_result_count=int(manifest["cell_result_count"]),
         solvable_cell_count=int(manifest["solvable_cell_count"]),
@@ -531,10 +499,13 @@ def _read_manifest(
     if not manifest_path.is_file():
         raise ValueError(f"Run state exists without a manifest: {manifest_path}")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if (
-        manifest.get("input_fingerprint", {}).get("identity")
-        != input_identity_fingerprint
-    ):
+    if manifest.get("schema_version") != ELIGIBILITY_SCHEMA_VERSION:
+        message = (
+            "Incompatible eligibility run manifest; choose a fresh output location and rebuild"
+        )
+        logger.error(message)
+        raise ValueError(message)
+    if manifest.get("input_fingerprint", {}).get("identity") != input_identity_fingerprint:
         raise ValueError("Existing run manifest does not match current inputs")
     return manifest
 
@@ -554,13 +525,9 @@ def _read_and_union_aoi(aoi_feature_path: str) -> arcpy.Geometry:
                 if geometry is None or geometry.pointCount == 0:
                     continue
                 if geometry.spatialReference != source_reference:
-                    raise ValueError(
-                        "AOI rows do not share the input spatial reference"
-                    )
+                    raise ValueError("AOI rows do not share the input spatial reference")
                 combined_geometry = (
-                    geometry
-                    if combined_geometry is None
-                    else combined_geometry.union(geometry)
+                    geometry if combined_geometry is None else combined_geometry.union(geometry)
                 )
     except arcpy.ExecuteError as exc:
         message = f"Could not read AOI geometry from '{aoi_feature_path}': {arcpy.GetMessages(2)}"
@@ -647,9 +614,7 @@ def _verify_partition_parts(manifest: dict[str, Any], partition_key: str) -> Non
     )
 
     run_directory = Path(manifest["run_directory"])
-    entries = [
-        part for part in manifest["parts"] if part["partition_key"] == partition_key
-    ]
+    entries = [part for part in manifest["parts"] if part["partition_key"] == partition_key]
     summary = manifest.get("partition_summaries", {}).get(partition_key)
     if summary is None:
         raise ValueError(f"Missing run summary for staged partition {partition_key}")
@@ -670,7 +635,7 @@ def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary_path = path.with_name(f"{path.name}.tmp")
     temporary_path.write_text(
-        json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str),
+        json.dumps(payload, sort_keys=True, separators=(",", ":")),
         encoding="utf-8",
     )
     temporary_path.replace(path)
@@ -689,8 +654,7 @@ def _build_summary(
         run_status=run_state.status.value,
         expected_partition_count=len(run_state.expected_partition_keys),
         reconciled_partition_count=sum(
-            status == PartitionStatus.RECONCILED
-            for status in run_state.partition_status.values()
+            status == PartitionStatus.RECONCILED for status in run_state.partition_status.values()
         ),
         cell_result_count=int(manifest["cell_result_count"]),
         solvable_cell_count=int(manifest["solvable_cell_count"]),

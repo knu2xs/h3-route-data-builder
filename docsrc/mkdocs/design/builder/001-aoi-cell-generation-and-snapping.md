@@ -1,5 +1,10 @@
 # Feature 001: Network-Intersecting Solvable Cells
 
+Feature 006 standardizes new cell identities as exact integer `h3_id` values. Eligibility
+working schemas/fingerprints are version 2, with required `uint64` staged columns.
+Legacy stages and completed runs are not adopted; rebuild in a fresh output location.
+Geometry, membership, and representative policy below are unchanged.
+
 ## Requirements
 
 1. Accept and validate an AOI.

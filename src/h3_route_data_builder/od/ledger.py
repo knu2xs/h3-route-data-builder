@@ -1,6 +1,6 @@
 """Portable SQLite-backed durable lifecycle for directed OD solve work."""
 
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import StrEnum
@@ -9,10 +9,13 @@ import json
 import math
 from pathlib import Path
 import sqlite3
+import shutil
+from tempfile import TemporaryDirectory
 from collections.abc import Iterable, Iterator, Sequence
 from typing import Any
 from uuid import uuid4
 
+from h3_route_data_builder.eligibility.cells import canonical_h3_ids
 from h3_route_data_builder.od.models import LedgerEvidence
 from h3_route_data_builder.od.results import (
     OutcomeClass,
@@ -23,7 +26,7 @@ from h3_route_data_builder.utils import get_logger
 
 logger = get_logger(__name__, level="DEBUG", add_stream_handler=False)
 
-LogicalODKey = tuple[str, str]
+LogicalODKey = tuple[int, int]
 
 
 class WorkState(StrEnum):
@@ -64,8 +67,8 @@ class WorkItem:
 
     work_id: str
     compatibility_fingerprint: str
-    origin_h3_id: str
-    destination_batch: tuple[str, ...]
+    origin_h3_id: int
+    destination_batch: tuple[int, ...]
     expected_logical_od_keys: tuple[LogicalODKey, ...]
     cutoff: float
     cost_unit: str
@@ -127,43 +130,34 @@ class ODLedger:
     """
 
     def __init__(self, database_path: str | Path, max_attempts: int = 3) -> None:
-        if (
-            isinstance(max_attempts, bool)
-            or not isinstance(max_attempts, int)
-            or max_attempts < 1
-        ):
+        if isinstance(max_attempts, bool) or not isinstance(max_attempts, int) or max_attempts < 1:
             raise ValueError("max_attempts must be a positive integer")
         self.database_path = Path(database_path)
         self.max_attempts = max_attempts
+        if self.database_path.exists():
+            self._preflight_existing()
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
         self._initialize()
 
     def plan_work(
         self,
         compatibility_fingerprint: str,
-        origin_h3_id: str,
-        destination_batch: Sequence[str],
+        origin_h3_id: int,
+        destination_batch: Sequence[int],
         cutoff: float,
         cost_unit: str,
     ) -> WorkItem:
         """Persist or idempotently retrieve a deterministic bounded work item."""
         _require_nonempty(compatibility_fingerprint, "compatibility_fingerprint")
-        _require_nonempty(origin_h3_id, "origin_h3_id")
+        canonical_h3_ids((origin_h3_id,))
         _finite_nonnegative(cutoff, "cutoff")
         _require_nonempty(cost_unit, "cost_unit")
         cost_unit = cost_unit.strip()
-        destinations = tuple(sorted(destination_batch))
+        destinations = tuple(canonical_h3_ids(destination_batch))
         if not destinations:
             raise ValueError("destination_batch must not be empty")
-        if any(
-            not isinstance(destination, str) or not destination.strip()
-            for destination in destinations
-        ):
-            raise ValueError("destination_batch identifiers must be non-empty strings")
-        if len(destinations) != len(set(destinations)):
-            raise ValueError(
-                "destination_batch must not contain duplicate destinations"
-            )
+        if len(destinations) != len(destination_batch):
+            raise ValueError("destination_batch must not contain duplicate destinations")
         if origin_h3_id in destinations:
             raise ValueError("self-pairs must not be included in solve work")
         work_id = make_work_id(compatibility_fingerprint, origin_h3_id, destinations)
@@ -179,9 +173,7 @@ class ODLedger:
                     or row["cutoff"] != float(cutoff)
                     or row["cost_unit"] != cost_unit
                 ):
-                    raise ValueError(
-                        "deterministic work ID already has conflicting definition"
-                    )
+                    raise ValueError("deterministic work ID already has conflicting definition")
             else:
                 connection.execute(
                     """
@@ -315,9 +307,7 @@ class ODLedger:
             raise RuntimeError("lease acquisition failed without an error")
         return lease
 
-    def start_solving(
-        self, work_id: str, lease: Lease, now: float | None = None
-    ) -> None:
+    def start_solving(self, work_id: str, lease: Lease, now: float | None = None) -> None:
         """Advance a currently leased item to solving."""
         instant = _now() if now is None else _finite_timestamp(now)
         with self._transaction() as connection:
@@ -424,16 +414,12 @@ class ODLedger:
                 _, outcomes = self._validated_stage(row)
             except ValueError as exc:
                 failure = str(exc)
-                self._record_failure(
-                    connection, row, "invalid_staged_output", failure, _now()
-                )
+                self._record_failure(connection, row, "invalid_staged_output", failure, _now())
             else:
                 connection.execute(
                     "UPDATE work_items SET staged_digest = ? WHERE work_id = ?",
                     (
-                        hashlib.sha256(
-                            row["staged_payload_json"].encode("utf-8")
-                        ).hexdigest(),
+                        hashlib.sha256(row["staged_payload_json"].encode("utf-8")).hexdigest(),
                         work_id,
                     ),
                 )
@@ -557,9 +543,7 @@ class ODLedger:
     def reschedule_invalidated(self, work_id: str, still_expected: bool) -> None:
         """Explicitly return invalidated work to planned when it remains expected."""
         if not still_expected:
-            raise ValueError(
-                "invalidated work can be rescheduled only if still expected"
-            )
+            raise ValueError("invalidated work can be rescheduled only if still expected")
         with self._transaction() as connection:
             self._require_row(connection, work_id)
             self._transition(
@@ -604,14 +588,10 @@ class ODLedger:
                 WorkState.VALIDATED,
             }:
                 raise RuntimeError(f"cannot fail work in state {state.value}")
-            target = self._record_failure(
-                connection, row, classification, message, instant
-            )
+            target = self._record_failure(connection, row, classification, message, instant)
         return target
 
-    def committed_outcomes(
-        self, compatibility_fingerprint: str
-    ) -> tuple[SolveOutcome, ...]:
+    def committed_outcomes(self, compatibility_fingerprint: str) -> tuple[SolveOutcome, ...]:
         """Return active committed outcomes for one compatibility identity."""
         with self._connection() as connection:
             rows = connection.execute(
@@ -626,13 +606,9 @@ class ODLedger:
                 """,
                 (compatibility_fingerprint,),
             ).fetchall()
-        return tuple(
-            SolveOutcome.from_dict(json.loads(row["payload_json"])) for row in rows
-        )
+        return tuple(SolveOutcome.from_dict(json.loads(row["payload_json"])) for row in rows)
 
-    def qualifying_outcomes(
-        self, compatibility_fingerprint: str
-    ) -> tuple[SolveOutcome, ...]:
+    def qualifying_outcomes(self, compatibility_fingerprint: str) -> tuple[SolveOutcome, ...]:
         """Return only actual route facts suitable for the Feature 004 handoff."""
         return tuple(
             outcome
@@ -644,11 +620,10 @@ class ODLedger:
         """Return per-key durable state observations for candidate reconciliation."""
         observations: list[LedgerEvidence] = []
         with self._connection() as connection:
-            rows = connection.execute(
-                "SELECT * FROM work_items ORDER BY work_id"
-            ).fetchall()
+            rows = connection.execute("SELECT * FROM work_items ORDER BY work_id").fetchall()
             for row in rows:
-                for origin, destination in json.loads(row["expected_keys_json"]):
+                item = _work_item(row)
+                for origin, destination in item.expected_logical_od_keys:
                     observations.append(
                         LedgerEvidence(
                             logical_od_key=(origin, destination),
@@ -676,6 +651,130 @@ class ODLedger:
             for row in rows
         )
 
+    def _preflight_existing(self) -> None:
+        """Refuse legacy or inconsistent state using a read-only connection before writes."""
+        required_columns = {
+            "work_items": {
+                "work_id",
+                "compatibility_fingerprint",
+                "origin_h3_id",
+                "destination_batch_json",
+                "expected_keys_json",
+                "cutoff",
+                "cost_unit",
+                "state",
+                "attempt_count",
+                "fencing_value",
+                "lease_owner",
+                "lease_expires_at",
+                "staged_payload_json",
+                "staged_fencing_value",
+                "staged_digest",
+                "committed_part_id",
+                "failure_class",
+                "failure_message",
+                "failure_recorded_at",
+            },
+            "ledger_metadata": {"key", "value"},
+            "committed_parts": {"part_id", "work_id", "checksum", "payload_json", "committed_at"},
+            "active_outcomes": {
+                "compatibility_fingerprint",
+                "origin_h3_id",
+                "destination_h3_id",
+                "part_id",
+                "payload_json",
+            },
+            "work_events": {
+                "event_id",
+                "work_id",
+                "from_state",
+                "to_state",
+                "recorded_at",
+                "details_json",
+            },
+        }
+        primary_keys = {
+            "work_items": ("work_id",),
+            "ledger_metadata": ("key",),
+            "committed_parts": ("part_id",),
+            "active_outcomes": ("compatibility_fingerprint", "origin_h3_id", "destination_h3_id"),
+            "work_events": ("event_id",),
+        }
+        try:
+            with ExitStack() as resources:
+                directory = Path(
+                    resources.enter_context(TemporaryDirectory(prefix="od-ledger-preflight-"))
+                )
+                snapshot = directory / "ledger.sqlite"
+                # Even mode=ro can create WAL/SHM files. Inspect an isolated snapshot instead.
+                source_paths = [self.database_path]
+                wal_path = self.database_path.with_name(self.database_path.name + "-wal")
+                if wal_path.exists():
+                    source_paths.append(wal_path)
+                signatures = {
+                    source: (source.stat().st_size, source.stat().st_mtime_ns)
+                    for source in source_paths
+                }
+                for source in source_paths:
+                    target = (
+                        snapshot
+                        if source == self.database_path
+                        else snapshot.with_name(snapshot.name + "-wal")
+                    )
+                    shutil.copyfile(source, target)
+                for source in source_paths:
+                    after = source.stat()
+                    if signatures[source] != (after.st_size, after.st_mtime_ns):
+                        raise ValueError(
+                            "ledger changed during preflight; stop other coordinators before reopening"
+                        )
+                if wal_path.exists() != (wal_path in source_paths):
+                    raise ValueError(
+                        "ledger WAL changed during preflight; stop other coordinators before reopening"
+                    )
+                connection = sqlite3.connect(snapshot.as_uri() + "?mode=ro", uri=True)
+                resources.callback(connection.close)
+                metadata = dict(connection.execute("SELECT key, value FROM ledger_metadata"))
+                if metadata.get("format_version") != "2":
+                    raise ValueError("ledger format version is not 2")
+                if metadata.get("max_attempts") != str(self.max_attempts):
+                    raise ValueError(
+                        "max_attempts differs from the retry policy persisted in the ledger"
+                    )
+                for table, required in required_columns.items():
+                    # Table identifiers come exclusively from this fixed internal allow-list.
+                    columns = {
+                        row[1]: row for row in connection.execute(f"PRAGMA table_info({table})")
+                    }
+                    if set(columns) != required:
+                        raise ValueError(f"inconsistent columns in {table}")
+                    actual_key = tuple(
+                        row[1] for row in sorted(columns.values(), key=lambda row: row[5]) if row[5]
+                    )
+                    if actual_key != primary_keys[table]:
+                        raise ValueError(f"inconsistent primary key in {table}")
+                    for endpoint in ("origin_h3_id", "destination_h3_id"):
+                        if endpoint in columns:
+                            column = columns[endpoint]
+                            if column[2].upper() != "INTEGER" or column[3] != 1:
+                                raise ValueError(f"{table}.{endpoint} is not INTEGER NOT NULL")
+                            definition = connection.execute(
+                                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+                                (table,),
+                            ).fetchone()[0]
+                            normalized = "".join(definition.lower().split())
+                            if f"check(typeof({endpoint})='integer')" not in normalized:
+                                raise ValueError(
+                                    f"{table}.{endpoint} lacks its integer storage check"
+                                )
+        except (sqlite3.DatabaseError, ValueError) as exc:
+            message = (
+                f"Incompatible OD ledger at '{self.database_path}': {exc}. "
+                "Choose a separate fresh ledger and rebuild; legacy state is not migrated."
+            )
+            logger.error(message)
+            raise ValueError(message) from exc
+
     def _initialize(self) -> None:
         with self._connection() as connection:
             connection.execute("PRAGMA journal_mode = WAL")
@@ -684,7 +783,7 @@ class ODLedger:
                 CREATE TABLE IF NOT EXISTS work_items (
                     work_id TEXT PRIMARY KEY,
                     compatibility_fingerprint TEXT NOT NULL,
-                    origin_h3_id TEXT NOT NULL,
+                    origin_h3_id INTEGER NOT NULL CHECK(typeof(origin_h3_id) = 'integer'),
                     destination_batch_json TEXT NOT NULL,
                     expected_keys_json TEXT NOT NULL,
                     cutoff REAL NOT NULL,
@@ -715,8 +814,8 @@ class ODLedger:
                 );
                 CREATE TABLE IF NOT EXISTS active_outcomes (
                     compatibility_fingerprint TEXT NOT NULL,
-                    origin_h3_id TEXT NOT NULL,
-                    destination_h3_id TEXT NOT NULL,
+                    origin_h3_id INTEGER NOT NULL CHECK(typeof(origin_h3_id) = 'integer'),
+                    destination_h3_id INTEGER NOT NULL CHECK(typeof(destination_h3_id) = 'integer'),
                     part_id TEXT NOT NULL,
                     payload_json TEXT NOT NULL,
                     PRIMARY KEY (
@@ -732,6 +831,9 @@ class ODLedger:
                     details_json TEXT NOT NULL
                 );
                 """
+            )
+            connection.execute(
+                "INSERT OR IGNORE INTO ledger_metadata (key, value) VALUES ('format_version', '2')"
             )
             connection.execute(
                 """
@@ -750,9 +852,7 @@ class ODLedger:
 
     @contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:
-        connection = sqlite3.connect(
-            str(self.database_path), timeout=30.0, isolation_level=None
-        )
+        connection = sqlite3.connect(str(self.database_path), timeout=30.0, isolation_level=None)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute("PRAGMA busy_timeout = 30000")
@@ -818,9 +918,7 @@ class ODLedger:
         if current is target:
             return
         if target not in _ALLOWED_TRANSITIONS[current]:
-            raise ValueError(
-                f"illegal work transition: {current.value} -> {target.value}"
-            )
+            raise ValueError(f"illegal work transition: {current.value} -> {target.value}")
         connection.execute(
             "UPDATE work_items SET state = ? WHERE work_id = ?",
             (target.value, work_id),
@@ -865,8 +963,7 @@ class ODLedger:
         if (
             row["lease_owner"] != lease.owner_id
             or int(row["fencing_value"]) != lease.fencing_value
-            or int(row["staged_fencing_value"] or row["fencing_value"])
-            != lease.fencing_value
+            or int(row["staged_fencing_value"] or row["fencing_value"]) != lease.fencing_value
             or row["lease_expires_at"] is None
             or float(row["lease_expires_at"]) <= now
         ):
@@ -890,19 +987,13 @@ class ODLedger:
             or row["staged_fencing_value"] != row["fencing_value"]
         ):
             raise ValueError("staged output fencing evidence is stale")
-        outcomes = tuple(
-            SolveOutcome.from_dict(value) for value in payload.get("outcomes", [])
-        )
+        outcomes = tuple(SolveOutcome.from_dict(value) for value in payload.get("outcomes", []))
         actual_keys = tuple(outcome.logical_od_key for outcome in outcomes)
-        expected_keys = tuple(
-            tuple(key) for key in json.loads(row["expected_keys_json"])
-        )
+        expected_keys = _work_item(row).expected_logical_od_keys
         if len(actual_keys) != len(set(actual_keys)):
             raise ValueError("staged output contains duplicate logical OD keys")
         if set(actual_keys) != set(expected_keys):
-            raise ValueError(
-                "staged output keys do not exactly match expected logical OD keys"
-            )
+            raise ValueError("staged output keys do not exactly match expected logical OD keys")
         for outcome in outcomes:
             validate_outcome(outcome, float(row["cutoff"]), row["cost_unit"])
         return payload, outcomes
@@ -910,17 +1001,17 @@ class ODLedger:
 
 def make_work_id(
     compatibility_fingerprint: str,
-    origin_h3_id: str,
-    destination_batch: Sequence[str],
+    origin_h3_id: int,
+    destination_batch: Sequence[int],
 ) -> str:
     """Return a stable work ID from compatibility identity and canonical batch identity."""
     _require_nonempty(compatibility_fingerprint, "compatibility_fingerprint")
-    _require_nonempty(origin_h3_id, "origin_h3_id")
-    destinations = tuple(sorted(destination_batch))
-    if not destinations or len(destinations) != len(set(destinations)):
+    canonical_h3_ids((origin_h3_id,))
+    destinations = tuple(canonical_h3_ids(destination_batch))
+    if not destinations or len(destinations) != len(destination_batch):
         raise ValueError("destination_batch must be non-empty and unique")
     identity = {
-        "version": 1,
+        "version": 2,
         "compatibility_fingerprint": compatibility_fingerprint,
         "origin_h3_id": origin_h3_id,
         "destination_batch": destinations,
@@ -929,6 +1020,16 @@ def make_work_id(
 
 
 def _work_item(row: sqlite3.Row) -> WorkItem:
+    origin = row["origin_h3_id"]
+    canonical_h3_ids((origin,))
+    destinations = tuple(json.loads(row["destination_batch_json"]))
+    if tuple(canonical_h3_ids(destinations)) != destinations:
+        raise ValueError("Persisted H3 destination batch is not canonical")
+    expected_keys = _decode_keys(row["expected_keys_json"])
+    if expected_keys != tuple((origin, destination) for destination in destinations):
+        raise ValueError("Persisted H3 expected keys do not match the work definition")
+    if make_work_id(row["compatibility_fingerprint"], origin, destinations) != row["work_id"]:
+        raise ValueError("Persisted work ID does not match its version-2 integer identity")
     lease = None
     if row["lease_owner"] is not None and row["lease_expires_at"] is not None:
         lease = Lease(
@@ -946,11 +1047,9 @@ def _work_item(row: sqlite3.Row) -> WorkItem:
     return WorkItem(
         work_id=row["work_id"],
         compatibility_fingerprint=row["compatibility_fingerprint"],
-        origin_h3_id=row["origin_h3_id"],
-        destination_batch=tuple(json.loads(row["destination_batch_json"])),
-        expected_logical_od_keys=tuple(
-            tuple(key) for key in json.loads(row["expected_keys_json"])
-        ),
+        origin_h3_id=origin,
+        destination_batch=destinations,
+        expected_logical_od_keys=expected_keys,
         cutoff=float(row["cutoff"]),
         cost_unit=row["cost_unit"],
         state=WorkState(row["state"]),
@@ -960,6 +1059,19 @@ def _work_item(row: sqlite3.Row) -> WorkItem:
         committed_part_id=row["committed_part_id"],
         failure_evidence=failure,
     )
+
+
+def _decode_keys(serialized: str) -> tuple[LogicalODKey, ...]:
+    values = json.loads(serialized)
+    if not isinstance(values, list):
+        raise ValueError("Persisted H3 keys must be an array of directed pairs")
+    keys: list[LogicalODKey] = []
+    for value in values:
+        if not isinstance(value, list) or len(value) != 2:
+            raise ValueError("Persisted H3 key must contain exactly two integer endpoints")
+        canonical_h3_ids(value)
+        keys.append((value[0], value[1]))
+    return tuple(keys)
 
 
 def _json(value: Any) -> str:
@@ -973,11 +1085,7 @@ def _now() -> float:
 
 
 def _finite_timestamp(value: float) -> float:
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, (int, float))
-        or not math.isfinite(value)
-    ):
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
         raise ValueError("timestamp must be finite")
     return float(value)
 

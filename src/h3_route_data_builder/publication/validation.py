@@ -4,11 +4,13 @@ import hashlib
 import json
 import math
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
+from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Mapping, Sequence
 
 import duckdb
-import h3
+from h3.api import basic_int as h3
+from h3_route_data_builder.eligibility.cells import canonical_h3_ids
 import pyarrow as pa
 import pyarrow.parquet as pq
 
@@ -20,49 +22,59 @@ from h3_route_data_builder.publication.schema import (
     SOLVABLE_CELLS_SCHEMA,
 )
 
-LogicalKey = tuple[str, str]
+LogicalKey = tuple[int, int]
 
 
-def validate_parts(parts: Sequence[PublishedPart]) -> tuple[str, ...]:
-    """Validate existence, checksums, row counts, schema IDs, and GeoParquet metadata."""
+def validate_parts(parts: Sequence[PublishedPart], max_workers: int = 2) -> tuple[str, ...]:
+    """Validate immutable parts serially or with bounded independent checks.
+
+    Concurrent results are flattened in input order so diagnostics remain deterministic.
+    """
+    if (
+        isinstance(max_workers, bool)
+        or not isinstance(max_workers, int)
+        or not 1 <= max_workers <= 2
+    ):
+        raise ValueError("max_workers must be 1 or 2")
+    if max_workers == 1 or len(parts) < 2:
+        return tuple(error for part in parts for error in _validate_part(part))
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        per_part_errors = executor.map(_validate_part, parts)
+        return tuple(error for errors in per_part_errors for error in errors)
+
+
+def _validate_part(part: PublishedPart) -> tuple[str, ...]:
     errors: list[str] = []
-    for part in parts:
-        if not part.path.is_file():
-            errors.append(f"Missing part file: {part.path}")
-            continue
-        if _sha256_file(part.path) != part.checksum:
-            errors.append(f"Part checksum mismatch: {part.path}")
-            continue
-        try:
-            parquet = pq.ParquetFile(part.path)
-            if parquet.metadata.num_rows != part.row_count:
-                errors.append(f"Part row count mismatch: {part.path}")
-            expected = (
-                SOLVABLE_CELLS_SCHEMA
-                if part.table_name == "solvable_cells"
-                else OD_FACTS_SCHEMA
+    if not part.path.is_file():
+        return (f"Missing part file: {part.path}",)
+    if _sha256_file(part.path) != part.checksum:
+        return (f"Part checksum mismatch: {part.path}",)
+    try:
+        parquet = pq.ParquetFile(part.path)
+        if parquet.metadata.num_rows != part.row_count:
+            errors.append(f"Part row count mismatch: {part.path}")
+        expected = SOLVABLE_CELLS_SCHEMA if part.table_name == "solvable_cells" else OD_FACTS_SCHEMA
+        if not parquet.schema_arrow.remove_metadata().equals(expected.remove_metadata()):
+            errors.append(f"Part schema mismatch: {part.path}")
+        if (parquet.schema_arrow.metadata or {}).get(b"schema_version") != expected.metadata[
+            b"schema_version"
+        ] or part.schema_version.encode() != expected.metadata[b"schema_version"]:
+            errors.append(f"Part schema version mismatch: {part.path}")
+        if part.table_name == "od_facts":
+            actual_origins = set(
+                parquet.read(columns=["origin_h3_id"]).column("origin_h3_id").to_pylist()
             )
-            if not parquet.schema_arrow.remove_metadata().equals(
-                expected.remove_metadata()
-            ):
-                errors.append(f"Part schema mismatch: {part.path}")
-            if part.table_name == "od_facts":
-                actual_origins = set(
-                    parquet.read(columns=["origin_h3_id_hex"])
-                    .column("origin_h3_id_hex")
-                    .to_pylist()
-                )
-                if actual_origins != set(part.origin_ids):
-                    errors.append(f"Part origin metadata mismatch: {part.path}")
-            if part.table_name == "solvable_cells":
-                geo_metadata = _validate_geo_metadata(
-                    parquet.schema_arrow.metadata or {},
-                    require_bbox=part.row_count > 0,
-                )
-                if part.row_count > 0:
-                    errors.extend(_validate_file_extents(part.path, geo_metadata))
-        except (duckdb.Error, OSError, ValueError, pa.ArrowException) as exc:
-            errors.append(f"Cannot validate part {part.path}: {exc}")
+            if actual_origins != set(part.origin_ids):
+                errors.append(f"Part origin metadata mismatch: {part.path}")
+        if part.table_name == "solvable_cells":
+            geo_metadata = _validate_geo_metadata(
+                parquet.schema_arrow.metadata or {},
+                require_bbox=part.row_count > 0,
+            )
+            if part.row_count > 0:
+                errors.extend(_validate_file_extents(part.path, geo_metadata))
+    except (duckdb.Error, OSError, ValueError, pa.ArrowException) as exc:
+        errors.append(f"Cannot validate part {part.path}: {exc}")
     return tuple(errors)
 
 
@@ -77,38 +89,37 @@ def validate_publication(
 ) -> ValidationReport:
     """Validate canonical tables against expected logical keys and authoritative outcomes."""
     errors: list[str] = []
-    if not dimension.schema.remove_metadata().equals(
-        SOLVABLE_CELLS_SCHEMA.remove_metadata()
-    ):
+    if not dimension.schema.remove_metadata().equals(SOLVABLE_CELLS_SCHEMA.remove_metadata()):
         errors.append("Solvable-cell dimension schema is incompatible")
     if not facts.schema.remove_metadata().equals(OD_FACTS_SCHEMA.remove_metadata()):
         errors.append("OD facts schema is incompatible")
+    for table, schema in ((dimension, SOLVABLE_CELLS_SCHEMA), (facts, OD_FACTS_SCHEMA)):
+        if (table.schema.metadata or {}).get(b"schema_version") != schema.metadata[
+            b"schema_version"
+        ]:
+            errors.append("Publication table has an incompatible integer schema version")
     try:
         _validate_geo_metadata(dimension.schema.metadata or {}, require_bbox=False)
     except ValueError as exc:
         errors.append(str(exc))
 
     cell_rows = dimension.to_pylist()
-    cell_ids = [row["h3_id_hex"] for row in cell_rows]
+    cell_ids = [row["h3_id"] for row in cell_rows]
     if len(set(cell_ids)) != len(cell_ids):
         errors.append("Solvable-cell dimension contains duplicate H3 identifiers")
     cell_id_set = set(cell_ids)
     for row in cell_rows:
         try:
-            canonical_h3 = h3.int_to_str(h3.str_to_int(row["h3_id_hex"]))
+            canonical_h3_ids((row["h3_id"],))
             if (
-                canonical_h3 != row["h3_id_hex"]
-                or h3.get_resolution(canonical_h3) != row["resolution"]
+                type(row["resolution"]) is not int
+                or h3.get_resolution(row["h3_id"]) != row["resolution"]
             ):
-                errors.append(
-                    f"Cell identifier is not canonical at its resolution: {row['h3_id_hex']}"
-                )
+                errors.append(f"Cell identifier is not canonical at its resolution: {row['h3_id']}")
         except (TypeError, ValueError):
-            errors.append(
-                f"Invalid H3 identifier in cell dimension: {row['h3_id_hex']}"
-            )
+            errors.append(f"Invalid H3 identifier in cell dimension: {row['h3_id']}")
         if row["eligibility_status"] != "solvable":
-            errors.append(f"Cell {row['h3_id_hex']} is not solvable")
+            errors.append(f"Cell {row['h3_id']} is not solvable")
         if any(
             row[column] is None
             for column in (
@@ -117,21 +128,22 @@ def validate_publication(
                 "representative_geometry",
             )
         ):
-            errors.append(f"Cell {row['h3_id_hex']} has missing geometry")
+            errors.append(f"Cell {row['h3_id']} has missing geometry")
 
     expected_counts = Counter(expected_keys)
     expected_set = set(expected_keys)
     if any(count > 1 for count in expected_counts.values()):
         errors.append("Expected logical OD keys contain duplicates")
     for key in expected_set:
-        if len(key) != 2 or not all(
-            isinstance(endpoint, str) and endpoint for endpoint in key
-        ):
+        try:
+            if not isinstance(key, tuple) or len(key) != 2:
+                raise ValueError("Expected key must be an ordered integer pair")
+            canonical_h3_ids(key)
+        except ValueError:
             errors.append(f"Invalid expected logical OD key: {key}")
-        elif key[0] not in cell_id_set or key[1] not in cell_id_set:
-            errors.append(
-                f"Expected OD key endpoint is absent from the dimension: {key}"
-            )
+            continue
+        if key[0] not in cell_id_set or key[1] not in cell_id_set:
+            errors.append(f"Expected OD key endpoint is absent from the dimension: {key}")
     outcome_counts = Counter()
     outcome_by_key: dict[LogicalKey, SolveOutcome] = {}
     for outcome in outcomes:
@@ -153,9 +165,7 @@ def validate_publication(
                     f"Route outcome has invalid actual-cost evidence: {outcome.logical_od_key}"
                 )
         elif outcome.actual_cost is not None or outcome.cost_unit is not None:
-            errors.append(
-                f"Non-route outcome contains route cost: {outcome.logical_od_key}"
-            )
+            errors.append(f"Non-route outcome contains route cost: {outcome.logical_od_key}")
     self_key_counts = Counter(self_pairs)
     if any(origin != destination for origin, destination in self_pairs):
         errors.append("Self-pair keys must have identical endpoints")
@@ -166,17 +176,13 @@ def validate_publication(
         errors.append("Self-pair records do not exactly match expected self keys")
 
     facts_rows = facts.to_pylist()
-    fact_keys = [
-        (row["origin_h3_id_hex"], row["destination_h3_id_hex"]) for row in facts_rows
-    ]
+    fact_keys = [(row["origin_h3_id"], row["destination_h3_id"]) for row in facts_rows]
     fact_counts = Counter(fact_keys)
     if any(count > 1 for count in fact_counts.values()):
         errors.append("OD facts contain duplicate directed logical keys")
     for row, key in zip(facts_rows, fact_keys):
         if key[0] not in cell_id_set or key[1] not in cell_id_set:
-            errors.append(
-                f"OD fact endpoint is absent from the solvable-cell dimension: {key}"
-            )
+            errors.append(f"OD fact endpoint is absent from the solvable-cell dimension: {key}")
         if row["build_fingerprint"] != build_fingerprint:
             errors.append(f"OD fact has an incompatible build fingerprint: {key}")
         matching_outcome = outcome_by_key.get(key)
@@ -193,17 +199,13 @@ def validate_publication(
                 cost_field = ""
                 errors.append(f"Committed outcome has an unsupported cost unit: {key}")
             if cost_field and row[cost_field] != matching_outcome.actual_cost:
-                errors.append(
-                    f"OD fact cost does not match its committed outcome: {key}"
-                )
+                errors.append(f"OD fact cost does not match its committed outcome: {key}")
             if not row["work_item_id"]:
                 errors.append(f"Non-self OD fact has no work_item_id: {key}")
 
     outcome_keys = set(outcome_by_key)
     if outcome_keys - expected_set:
-        errors.append(
-            f"Unexpected solve outcomes: {sorted(outcome_keys - expected_set)}"
-        )
+        errors.append(f"Unexpected solve outcomes: {sorted(outcome_keys - expected_set)}")
     if set(fact_keys) - expected_set:
         errors.append(f"Unexpected OD facts: {sorted(set(fact_keys) - expected_set)}")
     if set(self_pairs) - expected_set:
@@ -254,9 +256,7 @@ def validate_publication(
             if value is not None and (not math.isfinite(value) or value < 0):
                 errors.append(f"OD fact has an invalid {name} value")
     outcome_counts["self_pair"] += len(self_pairs)
-    return ValidationReport(
-        not errors, tuple(errors), dict(sorted(outcome_counts.items()))
-    )
+    return ValidationReport(not errors, tuple(errors), dict(sorted(outcome_counts.items())))
 
 
 def _validate_geo_metadata(
@@ -305,8 +305,7 @@ def _validate_geo_metadata(
             not isinstance(bbox, list)
             or len(bbox) != 4
             or any(
-                not isinstance(value, (float, int)) or not math.isfinite(value)
-                for value in bbox
+                not isinstance(value, (float, int)) or not math.isfinite(value) for value in bbox
             )
         ):
             raise ValueError(f"GeoParquet geometry {name} has no usable bbox")
@@ -317,9 +316,7 @@ def _validate_geo_metadata(
     return extents
 
 
-def _validate_file_extents(
-    path: Path, metadata_extents: dict[str, list[float]]
-) -> list[str]:
+def _validate_file_extents(path: Path, metadata_extents: dict[str, list[float]]) -> list[str]:
     """Compare advertised GeoParquet bboxes with geometry-derived DuckDB extents."""
     connection = duckdb.connect()
     try:
@@ -333,18 +330,14 @@ def _validate_file_extents(
                 [str(path)],
             ).fetchone()
             if values is None or any(value is None for value in values):
-                errors.append(
-                    f"GeoParquet geometry {column_name} has no readable extent"
-                )
+                errors.append(f"GeoParquet geometry {column_name} has no readable extent")
                 continue
             actual = [float(value) for value in values]
             if any(
                 abs(actual_value - expected_value) > 1e-9
                 for actual_value, expected_value in zip(actual, expected)
             ):
-                errors.append(
-                    f"GeoParquet geometry {column_name} bbox does not match data"
-                )
+                errors.append(f"GeoParquet geometry {column_name} bbox does not match data")
         return errors
     finally:
         connection.close()

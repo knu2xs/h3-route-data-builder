@@ -32,7 +32,7 @@ from h3_route_data_builder.publication.write import write_table
 from h3_route_data_builder.utils import get_logger
 
 logger = get_logger(__name__, level="DEBUG", add_stream_handler=False)
-LogicalKey = tuple[str, str]
+LogicalKey = tuple[int, int]
 FaultHook = Callable[[str], None]
 
 
@@ -89,9 +89,7 @@ def publish_dataset(
             or loaded.manifest["solve_provenance"] != solve_provenance
             or loaded.manifest["prefilter_pruned_count"] != prefilter_pruned_count
         ):
-            raise ValueError(
-                "Existing immutable version differs from requested table rows"
-            )
+            raise ValueError("Existing immutable version differs from requested table rows")
         _expose_current(current_reference, selected_version_id, final_path)
         return _publication_result(final_path, current_reference, loaded.manifest)
 
@@ -99,9 +97,7 @@ def publish_dataset(
     if stage_path.exists():
         shutil.rmtree(stage_path)
     stage_path.mkdir(parents=True)
-    cell_part = write_table(
-        dimension, stage_path / "solvable_cells.parquet", "solvable_cells"
-    )
+    cell_part = write_table(dimension, stage_path / "solvable_cells.parquet", "solvable_cells")
     fact_parts_result = write_table(
         facts,
         stage_path / "od_facts",
@@ -204,9 +200,7 @@ def read_current_publication(output_root: str | os.PathLike[str]) -> LoadedPubli
         or success.get("manifest_sha256") != actual_checksum
         or success.get("version_id") != loaded.version_id
     ):
-        raise ValueError(
-            "Published version completion marker does not match its manifest"
-        )
+        raise ValueError("Published version completion marker does not match its manifest")
     return loaded
 
 
@@ -251,9 +245,7 @@ def _load_version(version_path: Path) -> LoadedPublication:
     )
     if not fact_tables:
         facts_table = facts_table.replace_schema_metadata(OD_FACTS_SCHEMA.metadata)
-    reconciliation = json.loads(
-        (version_path / "reconciliation.json").read_text(encoding="utf-8")
-    )
+    reconciliation = json.loads((version_path / "reconciliation.json").read_text(encoding="utf-8"))
     outcomes = [SolveOutcome.from_dict(item) for item in reconciliation["outcomes"]]
     self_pairs = [tuple(key) for key in reconciliation["self_pairs"]]
     expected_keys = [tuple(key) for key in reconciliation["expected_keys"]]
@@ -271,9 +263,7 @@ def _load_version(version_path: Path) -> LoadedPublication:
         solve_states=solve_states or None,
     )
     if not report.valid:
-        raise ValueError(
-            "Published logical records are invalid: " + "; ".join(report.errors)
-        )
+        raise ValueError("Published logical records are invalid: " + "; ".join(report.errors))
     if cell_table.num_rows != manifest["dimension_row_count"]:
         raise ValueError("Published cell dimension row count does not match manifest")
     if facts_table.num_rows != manifest["published_key_count"]:
@@ -344,11 +334,7 @@ def _manifest_from_document(document: dict[str, Any]) -> DatasetManifest:
                 parts=parts,
                 row_count=raw_partition["row_count"],
                 schema_version=raw_partition["schema_version"],
-                extent=(
-                    tuple(raw_partition["extent"])
-                    if raw_partition.get("extent")
-                    else None
-                ),
+                extent=(tuple(raw_partition["extent"]) if raw_partition.get("extent") else None),
             )
         )
     return DatasetManifest(
@@ -388,8 +374,7 @@ def _version_id(
         "result_fingerprint": result_fingerprint,
         "expected_keys": sorted([list(key) for key in expected_keys]),
         "outcomes": [
-            outcome.to_dict()
-            for outcome in sorted(outcomes, key=lambda item: item.logical_od_key)
+            outcome.to_dict() for outcome in sorted(outcomes, key=lambda item: item.logical_od_key)
         ],
     }
     digest.update(

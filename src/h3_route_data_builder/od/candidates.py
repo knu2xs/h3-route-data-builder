@@ -9,7 +9,7 @@ import math
 from enum import Enum
 from typing import Any
 
-from h3 import get_resolution, str_to_int
+from h3.api.basic_int import get_resolution
 
 from h3_route_data_builder.config import ConfigNode, config as project_config
 from h3_route_data_builder.eligibility.cells import canonical_h3_ids
@@ -123,14 +123,10 @@ def cutoff_reach_m(
                 "A time cutoff requires maximum_network_speed_mps or another proven "
                 "conservative spatial reach"
             )
-        _require_finite_nonnegative(
-            maximum_network_speed_mps, "maximum_network_speed_mps"
-        )
+        _require_finite_nonnegative(maximum_network_speed_mps, "maximum_network_speed_mps")
         if maximum_network_speed_mps <= 0:
             raise ValueError("maximum_network_speed_mps must be positive")
-        reach_distance_m = (
-            float(cutoff) * _TIME_TO_SECONDS[unit] * maximum_network_speed_mps
-        )
+        reach_distance_m = float(cutoff) * _TIME_TO_SECONDS[unit] * maximum_network_speed_mps
     else:
         raise ValueError(f"Unsupported cutoff_unit: {cutoff_unit!r}")
     if not math.isfinite(reach_distance_m):
@@ -172,9 +168,7 @@ def candidate_policy_manifest(
     _require_finite_nonnegative(maximum_origin_offset_m, "maximum_origin_offset_m")
     _validate_error_bound(prefilter_distance_error_bound_m)
     if maximum_network_speed_mps is not None:
-        _require_finite_nonnegative(
-            maximum_network_speed_mps, "maximum_network_speed_mps"
-        )
+        _require_finite_nonnegative(maximum_network_speed_mps, "maximum_network_speed_mps")
     policy: dict[str, Any] = {
         "candidate_policy_version": CANDIDATE_POLICY_VERSION,
         "execution_limit_policy_version": EXECUTION_LIMIT_POLICY_VERSION,
@@ -256,9 +250,7 @@ def restore_candidate_policy(
     }
     missing = required_fields - saved_policy.keys()
     if missing:
-        raise ValueError(
-            f"Saved candidate policy is missing fields: {', '.join(sorted(missing))}"
-        )
+        raise ValueError(f"Saved candidate policy is missing fields: {', '.join(sorted(missing))}")
     if saved_policy["candidate_policy_version"] != CANDIDATE_POLICY_VERSION:
         raise ValueError("Saved candidate policy version is unsupported")
     if saved_policy["execution_limit_policy_version"] != EXECUTION_LIMIT_POLICY_VERSION:
@@ -277,25 +269,16 @@ def restore_candidate_policy(
         raise ValueError("Saved candidate policy has an unsupported cutoff unit")
     _require_finite_nonnegative(cutoff, "saved cutoff")
     _require_finite_nonnegative(reach_distance_m, "saved reach_distance_m")
-    _require_finite_nonnegative(
-        maximum_origin_offset_m, "saved maximum_origin_offset_m"
-    )
+    _require_finite_nonnegative(maximum_origin_offset_m, "saved maximum_origin_offset_m")
     _validate_error_bound(error_bound)
     if cutoff_unit.strip().casefold() in _TIME_TO_SECONDS:
         if maximum_network_speed_mps is None:
             raise ValueError("Saved time-cutoff policy has no maximum network speed")
-        if (
-            not _valid_number(maximum_network_speed_mps)
-            or float(maximum_network_speed_mps) <= 0
-        ):
-            raise ValueError(
-                "Saved maximum_network_speed_mps must be positive and finite"
-            )
+        if not _valid_number(maximum_network_speed_mps) or float(maximum_network_speed_mps) <= 0:
+            raise ValueError("Saved maximum_network_speed_mps must be positive and finite")
 
     raw_limits = saved_policy["limits"]
-    limits = (
-        ExecutionLimits.from_manifest(raw_limits) if raw_limits is not None else None
-    )
+    limits = ExecutionLimits.from_manifest(raw_limits) if raw_limits is not None else None
     if explicit_overrides:
         allowed_overrides = {
             "mode",
@@ -354,7 +337,7 @@ def build_candidate_plan(
     scope: CandidateScope,
     cutoff: float,
     cutoff_unit: str,
-    representative_distances_m: Mapping[tuple[str, str], float | None] | None = None,
+    representative_distances_m: Mapping[tuple[int, int], float | None] | None = None,
     prefilter_distance_error_bound_m: float | None | _UseConfiguredErrorBound = (
         _USE_CONFIGURED_ERROR_BOUND
     ),
@@ -386,13 +369,9 @@ def build_candidate_plan(
         prefilter_distance_error_bound_m = configured_prefilter_distance_error_bound_m()
     _validate_error_bound(prefilter_distance_error_bound_m)
     _require_finite_nonnegative(scope.reach_distance_m, "scope.reach_distance_m")
-    _require_finite_nonnegative(
-        scope.maximum_origin_offset_m, "scope.maximum_origin_offset_m"
-    )
+    _require_finite_nonnegative(scope.maximum_origin_offset_m, "scope.maximum_origin_offset_m")
     if scope.reach_distance_m < reach_distance_m:
-        raise ValueError(
-            "Candidate scope reach_distance_m is below the cutoff-derived reach"
-        )
+        raise ValueError("Candidate scope reach_distance_m is below the cutoff-derived reach")
 
     scope_origins = _canonical_scope_ids(scope.origin_ids, "origin_ids")
     scope_destinations = _canonical_scope_ids(scope.destination_ids, "destination_ids")
@@ -406,20 +385,18 @@ def build_candidate_plan(
     destination_set = set(scope_destinations)
     if mode == CandidateMode.AOI_ONLY and origin_set != destination_set:
         raise ValueError("AOI-only destination_ids must equal origin_ids")
-    if mode == CandidateMode.AOI_TO_SURROUNDING and not origin_set.issubset(
-        destination_set
-    ):
+    if mode == CandidateMode.AOI_TO_SURROUNDING and not origin_set.issubset(destination_set):
         raise ValueError("Surrounding destination_ids must include every origin ID")
 
-    cell_by_id: dict[str, SolvableCell] = {}
-    seen_cells: dict[str, SolvableCell] = {}
+    cell_by_id: dict[int, SolvableCell] = {}
+    seen_cells: dict[int, SolvableCell] = {}
     duplicate_count = 0
-    unique_solvable_ids: set[str] = set()
+    unique_solvable_ids: set[int] = set()
     rejected: dict[str, int] = defaultdict(int)
-    rejected_cell_ids: dict[str, str] = {}
+    rejected_cell_ids: dict[int, str] = {}
     for cell in cells:
         try:
-            cell_id = _canonical_id(cell.h3_id_hex)
+            cell_id = _canonical_id(cell.h3_id)
         except (TypeError, ValueError):
             rejected["invalid_h3_id"] += 1
             continue
@@ -431,9 +408,7 @@ def build_candidate_plan(
                 or previous.eligibility_status != cell.eligibility_status
                 or previous.representative != cell.representative
             ):
-                raise ValueError(
-                    f"Conflicting duplicate solvable-cell references for {cell_id!r}"
-                )
+                raise ValueError(f"Conflicting duplicate solvable-cell references for {cell_id!r}")
             continue
         seen_cells[cell_id] = cell
         if cell.eligibility_status == "solvable":
@@ -441,9 +416,7 @@ def build_candidate_plan(
         if isinstance(cell.resolution, bool) or not isinstance(cell.resolution, int):
             rejected_cell_ids[cell_id] = "invalid_resolution"
             continue
-        if cell.resolution != _resolution(cell_id) or (
-            cell.resolution != scope.resolution
-        ):
+        if cell.resolution != _resolution(cell_id) or (cell.resolution != scope.resolution):
             rejected_cell_ids[cell_id] = "resolution_mismatch"
             continue
         if cell.eligibility_status != "solvable":
@@ -478,9 +451,7 @@ def build_candidate_plan(
         if cell_id not in cell_by_id:
             rejected[rejected_cell_ids.get(cell_id, "missing_cell")] += 1
     valid_origins = tuple(cell_id for cell_id in scope_origins if cell_id in cell_by_id)
-    valid_destinations = tuple(
-        cell_id for cell_id in scope_destinations if cell_id in cell_by_id
-    )
+    valid_destinations = tuple(cell_id for cell_id in scope_destinations if cell_id in cell_by_id)
     if mode == CandidateMode.AOI_TO_SURROUNDING:
         valid_destinations = tuple(
             sorted(
@@ -523,11 +494,7 @@ def build_candidate_plan(
             if prefilter_distance_error_bound_m is None or not valid_distance:
                 unbounded_count += 1
                 retained_count += 1
-                pairs.append(
-                    DirectedPair(
-                        origin_id, destination_id, CandidateDisposition.RETAINED
-                    )
-                )
+                pairs.append(DirectedPair(origin_id, destination_id, CandidateDisposition.RETAINED))
                 continue
 
             lower_bound_m = max(
@@ -608,7 +575,7 @@ def build_candidate_plan(
 
 def classify_solved_costs(
     plan: CandidatePlan,
-    actual_solved_costs: Mapping[tuple[str, str], float],
+    actual_solved_costs: Mapping[tuple[int, int], float],
 ) -> CandidatePlan:
     """Classify completed retained pairs using actual network costs only.
 
@@ -627,7 +594,7 @@ def classify_solved_costs(
         for pair in plan.pairs
         if pair.disposition == CandidateDisposition.RETAINED
     }
-    normalized_costs: dict[tuple[str, str], float] = {}
+    normalized_costs: dict[tuple[int, int], float] = {}
     for raw_key, cost in actual_solved_costs.items():
         if cost is None or isinstance(cost, bool) or not isinstance(cost, (int, float)):
             raise ValueError("A finite actual solved cost is required")
@@ -649,9 +616,7 @@ def classify_solved_costs(
         else:
             disposition = CandidateDisposition.CUTOFF_EXCLUDED
             excluded_count += 1
-        updated_pairs.append(
-            replace(pair, disposition=disposition, solved_cost=actual_cost)
-        )
+        updated_pairs.append(replace(pair, disposition=disposition, solved_cost=actual_cost))
     summary = replace(
         plan.summary,
         solved_result_count=len(normalized_costs),
@@ -730,7 +695,7 @@ def reconcile_candidate_work(
     if len(expected_keys) != len(set(expected_keys)):
         raise ValueError("Candidate plan contains duplicate logical OD keys")
 
-    evidence_by_key: dict[tuple[str, str], list[LedgerEvidence]] = defaultdict(list)
+    evidence_by_key: dict[tuple[int, int], list[LedgerEvidence]] = defaultdict(list)
     for evidence in ledger_evidence:
         key = (
             _canonical_id(evidence.logical_od_key[0]),
@@ -738,11 +703,11 @@ def reconcile_candidate_work(
         )
         evidence_by_key[key].append(evidence)
 
-    reused: list[tuple[str, str]] = []
-    resumed: list[tuple[str, str]] = []
-    terminal: list[tuple[str, str]] = []
-    planned: list[tuple[str, str]] = []
-    compatible_state_by_key: dict[tuple[str, str], str] = {}
+    reused: list[tuple[int, int]] = []
+    resumed: list[tuple[int, int]] = []
+    terminal: list[tuple[int, int]] = []
+    planned: list[tuple[int, int]] = []
+    compatible_state_by_key: dict[tuple[int, int], str] = {}
     for key in expected_keys:
         compatible = [
             item
@@ -767,22 +732,16 @@ def reconcile_candidate_work(
         elif state in _TERMINAL_STATES:
             terminal.append(key)
         else:
-            raise ValueError(
-                f"Unsupported Feature 003 ledger state: {evidence.state!r}"
-            )
+            raise ValueError(f"Unsupported Feature 003 ledger state: {evidence.state!r}")
 
     retryable = [
-        key
-        for key in resumed
-        if compatible_state_by_key[key] in {"retryable", "retryable_failure"}
+        key for key in resumed if compatible_state_by_key[key] in {"retryable", "retryable_failure"}
     ]
     committed_set = set(reused)
     terminal_set = set(terminal)
     retryable_set = set(retryable)
     unresolved = [
-        key
-        for key in expected_keys
-        if key not in committed_set | terminal_set | retryable_set
+        key for key in expected_keys if key not in committed_set | terminal_set | retryable_set
     ]
     if not unresolved and not terminal:
         completion_status = "all_success"
@@ -792,7 +751,7 @@ def reconcile_candidate_work(
         completion_status = "in_progress"
 
     work_units: list[LedgerWorkUnit] = []
-    expected_by_origin: dict[str, list[str]] = defaultdict(list)
+    expected_by_origin: dict[int, list[int]] = defaultdict(list)
     planned_key_set = set(planned)
     for origin_id, destination_id in expected_keys:
         expected_by_origin[origin_id].append(destination_id)
@@ -801,9 +760,7 @@ def reconcile_candidate_work(
         for batch_index, start in enumerate(
             range(0, len(ordered_destinations), destination_batch_size)
         ):
-            expected_batch = ordered_destinations[
-                start : start + destination_batch_size
-            ]
+            expected_batch = ordered_destinations[start : start + destination_batch_size]
             destination_batch = tuple(
                 destination_id
                 for destination_id in expected_batch
@@ -811,9 +768,7 @@ def reconcile_candidate_work(
             )
             if not destination_batch:
                 continue
-            keys = tuple(
-                (origin_id, destination_id) for destination_id in destination_batch
-            )
+            keys = tuple((origin_id, destination_id) for destination_id in destination_batch)
             work_units.append(
                 LedgerWorkUnit(
                     dataset_fingerprint=dataset_fingerprint,
@@ -846,9 +801,7 @@ def reconcile_candidate_work(
             "unresolved_count",
         )
     ) != len(expected_keys):
-        raise RuntimeError(
-            "Ledger reconciliation counts do not partition expected keys"
-        )
+        raise RuntimeError("Ledger reconciliation counts do not partition expected keys")
 
     reconciliation = CandidateReconciliation(
         expected_keys=expected_keys,
@@ -869,33 +822,27 @@ def reconcile_candidate_work(
     return reconciliation
 
 
-def _canonical_scope_ids(cell_ids: Iterable[str], field_name: str) -> tuple[str, ...]:
+def _canonical_scope_ids(cell_ids: Iterable[int], field_name: str) -> tuple[int, ...]:
     try:
         return tuple(canonical_h3_ids(cell_ids))
     except (TypeError, ValueError) as exc:
-        raise ValueError(
-            f"{field_name} contains an invalid H3 identifier: {exc}"
-        ) from exc
+        raise ValueError(f"{field_name} contains an invalid H3 identifier: {exc}") from exc
 
 
-def _canonical_id(cell_id: str) -> str:
+def _canonical_id(cell_id: int) -> int:
     return canonical_h3_ids((cell_id,))[0]
 
 
-def _h3_order(cell_id: str) -> int:
-    return str_to_int(cell_id)
+def _h3_order(cell_id: int) -> int:
+    return cell_id
 
 
-def _resolution(cell_id: str) -> int:
+def _resolution(cell_id: int) -> int:
     return get_resolution(cell_id)
 
 
 def _valid_representative(representative: tuple[float, float] | None) -> bool:
-    if (
-        representative is None
-        or not isinstance(representative, tuple)
-        or len(representative) != 2
-    ):
+    if representative is None or not isinstance(representative, tuple) or len(representative) != 2:
         return False
     longitude, latitude = representative
     return (
@@ -907,9 +854,9 @@ def _valid_representative(representative: tuple[float, float] | None) -> bool:
 
 
 def _canonical_distance_map(
-    distances: Mapping[tuple[str, str], float | None],
-) -> dict[tuple[str, str], float | None]:
-    normalized: dict[tuple[str, str], float | None] = {}
+    distances: Mapping[tuple[int, int], float | None],
+) -> dict[tuple[int, int], float | None]:
+    normalized: dict[tuple[int, int], float | None] = {}
     for key, value in distances.items():
         if len(key) != 2:
             continue

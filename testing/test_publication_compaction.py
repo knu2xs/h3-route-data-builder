@@ -10,7 +10,7 @@ from testing.publication_fixtures import make_outcome, make_publication_tables
 
 def test_compaction_creates_new_version_without_changing_source(temp_dir) -> None:
     dimension, facts = make_publication_tables()
-    origin, destination = "8928308280fffff", "8928308280bffff"
+    origin, destination = 617700169958293503, 617700169958031359
     root = temp_dir / "store"
     source = publish_dataset(
         root,
@@ -32,14 +32,8 @@ def test_compaction_creates_new_version_without_changing_source(temp_dir) -> Non
 
     assert compacted.version_id != source.version_id
     assert current.version_id == compacted.version_id
-    assert (
-        source.version_path / "solvable_cells.parquet"
-    ).read_bytes() == original_cell_bytes
+    assert (source.version_path / "solvable_cells.parquet").read_bytes() == original_cell_bytes
     assert current.dimension.to_pylist() == dimension.to_pylist()
     assert {
-        (row["origin_h3_id_hex"], row["destination_h3_id_hex"])
-        for row in current.facts.to_pylist()
-    } == {
-        (row["origin_h3_id_hex"], row["destination_h3_id_hex"])
-        for row in facts.to_pylist()
-    }
+        (row["origin_h3_id"], row["destination_h3_id"]) for row in current.facts.to_pylist()
+    } == {(row["origin_h3_id"], row["destination_h3_id"]) for row in facts.to_pylist()}

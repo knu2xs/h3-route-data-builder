@@ -9,6 +9,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from h3_route_data_builder.utils import get_logger
+from h3_route_data_builder.eligibility.cells import canonical_h3_ids
 
 logger = get_logger(__name__, level="DEBUG", add_stream_handler=False)
 
@@ -44,11 +45,15 @@ class OutcomeClass(StrEnum):
 class SolveOutcome:
     """One classified outcome for a directed logical OD key."""
 
-    logical_od_key: tuple[str, str]
+    logical_od_key: tuple[int, int]
     classification: OutcomeClass
     actual_cost: float | None
     cost_unit: str | None
     diagnostic: str | None = None
+
+    def __post_init__(self) -> None:
+        """Reject noncanonical identity before an outcome can enter builder state."""
+        _validate_key(self.logical_od_key)
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-compatible outcome record."""
@@ -67,7 +72,7 @@ class SolveOutcome:
         if not isinstance(key, list) or len(key) != 2:
             raise ValueError("logical_od_key must contain two endpoint identifiers")
         return cls(
-            logical_od_key=(str(key[0]), str(key[1])),
+            logical_od_key=(key[0], key[1]),
             classification=OutcomeClass(value["classification"]),
             actual_cost=value.get("actual_cost"),
             cost_unit=value.get("cost_unit"),
@@ -75,9 +80,7 @@ class SolveOutcome:
         )
 
 
-def compatibility_fingerprint(
-    result_inputs: Mapping[str, Any], version: str = "1"
-) -> str:
+def compatibility_fingerprint(result_inputs: Mapping[str, Any], version: str = "2") -> str:
     """Hash result-affecting values while excluding run-only provenance.
 
     Args:
@@ -98,7 +101,7 @@ def compatibility_fingerprint(
     canonical_inputs = _without_run_provenance(result_inputs)
     if not canonical_inputs:
         raise ValueError("result_inputs must contain result-affecting identity")
-    payload = {"version": version, "inputs": canonical_inputs}
+    payload = {"version": version, "h3_identity_encoding": 2, "inputs": canonical_inputs}
     try:
         encoded = json.dumps(
             payload,
@@ -113,7 +116,7 @@ def compatibility_fingerprint(
 
 
 def classify_actual_cost(
-    logical_od_key: tuple[str, str],
+    logical_od_key: tuple[int, int],
     actual_cost: float,
     cutoff: float,
     cost_unit: str,
@@ -125,9 +128,7 @@ def classify_actual_cost(
     if not isinstance(cost_unit, str) or not cost_unit.strip():
         raise ValueError("cost_unit must be non-empty")
     classification = (
-        OutcomeClass.QUALIFYING
-        if actual_cost <= cutoff
-        else OutcomeClass.CUTOFF_EXCLUDED
+        OutcomeClass.QUALIFYING if actual_cost <= cutoff else OutcomeClass.CUTOFF_EXCLUDED
     )
     return SolveOutcome(
         logical_od_key=logical_od_key,
@@ -192,17 +193,10 @@ def _candidate_result_inputs(value: Any) -> dict[str, Any]:
     }
 
 
-def _validate_key(logical_od_key: tuple[str, str]) -> None:
-    if (
-        not isinstance(logical_od_key, tuple)
-        or len(logical_od_key) != 2
-        or any(
-            not isinstance(value, str) or not value.strip() for value in logical_od_key
-        )
-    ):
-        raise ValueError(
-            "logical_od_key must be an ordered pair of non-empty identifiers"
-        )
+def _validate_key(logical_od_key: tuple[int, int]) -> None:
+    if not isinstance(logical_od_key, tuple) or len(logical_od_key) != 2:
+        raise ValueError("logical_od_key must be an ordered pair of integer H3 cell identifiers")
+    canonical_h3_ids(logical_od_key)
 
 
 def _finite_nonnegative(value: float, name: str) -> None:

@@ -1,7 +1,9 @@
 """Acceptance tests for Feature 003 logical-key reconciliation handoff."""
 
-import h3
+from h3.api import basic_int as h3
 import pytest
+from pathlib import Path
+import sqlite3
 
 from h3_route_data_builder.od.candidates import (
     build_candidate_plan,
@@ -15,25 +17,83 @@ from h3_route_data_builder.od.models import (
     LedgerEvidence,
     SolvableCell,
 )
+from h3_route_data_builder.od.ledger import ODLedger, WorkItem
+from h3_route_data_builder.od.results import SolveOutcome, classify_actual_cost
+from h3_route_data_builder.od.solving import solve_work_item
+
+
+def test_integer_ledger_expansion_reuses_only_compatible_completed_pairs(tmp_path: Path) -> None:
+    legacy_path = tmp_path / "legacy.sqlite"
+    connection = sqlite3.connect(legacy_path)
+    connection.execute("CREATE TABLE work_items (origin_h3_id TEXT)")
+    connection.execute("INSERT INTO work_items VALUES ('8928308280fffff')")
+    connection.commit()
+    connection.close()
+    legacy_bytes = legacy_path.read_bytes()
+    with pytest.raises(ValueError, match="fresh|rebuild"):
+        ODLedger(legacy_path)
+    cells = make_cells()
+    initial_ids = tuple(cell.h3_id for cell in cells[:2])
+    initial_scope = CandidateScope("aoi_only", initial_ids, initial_ids, 1000.0, 9)
+    initial_plan = build_candidate_plan(cells[:2], initial_scope, 1000, "m")
+    ledger = ODLedger(tmp_path / "fresh.sqlite")
+    initial = reconcile_candidate_work(initial_plan, ledger.evidence(), "integer-compatible", 1)
+    assert initial.reused_keys == ()
+    work_ids: list[str] = []
+
+    def solver(item: WorkItem, scratch: Path) -> tuple[SolveOutcome, ...]:
+        return tuple(
+            classify_actual_cost(key, 1, 1000, "m") for key in item.expected_logical_od_keys
+        )
+
+    for unit in initial.work_units:
+        item = ledger.plan_work(
+            "integer-compatible", unit.origin_h3_id, unit.destination_ids, 1000, "m"
+        )
+        work_ids.append(item.work_id)
+        solve_work_item(ledger, item.work_id, "coordinator", solver, 30)
+    ledger = ODLedger(ledger.database_path)
+    expanded_plan, expected = make_plan()
+    expanded = reconcile_candidate_work(expanded_plan, ledger.evidence(), "integer-compatible", 1)
+    assert set(expanded.reused_keys) == set(initial.expected_keys)
+    assert set(expanded.planned_keys) == set(expected) - set(initial.expected_keys)
+    assert not set(expanded.reused_keys).intersection(expanded.planned_keys)
+    ledger.invalidate(work_ids[0], "representative invalidated")
+    invalidated = reconcile_candidate_work(
+        expanded_plan, ledger.evidence(), "integer-compatible", 1
+    )
+    assert len(invalidated.reused_keys) == len(initial.expected_keys) - 1
+    assert len(invalidated.planned_keys) == len(expanded.planned_keys) + 1
+    reversed_plan = build_candidate_plan(list(reversed(cells)), expanded_plan.scope, 1000, "m")
+    assert (
+        reconcile_candidate_work(reversed_plan, ledger.evidence(), "integer-compatible", 1)
+        == invalidated
+    )
+    incompatible = reconcile_candidate_work(
+        expanded_plan, ledger.evidence(), "different-network", 1
+    )
+    assert incompatible.reused_keys == ()
+    assert set(incompatible.planned_keys) == set(expected)
+    assert legacy_path.read_bytes() == legacy_bytes
 
 
 def make_cells() -> list[SolvableCell]:
     """Create two deterministic solvable cell references."""
     return [
         SolvableCell(
-            h3_id_hex=h3.latlng_to_cell(0.0, 0.0, 9),
+            h3_id=h3.latlng_to_cell(0.0, 0.0, 9),
             resolution=9,
             eligibility_status="solvable",
             representative=(0.0, 0.0),
         ),
         SolvableCell(
-            h3_id_hex=h3.latlng_to_cell(0.0, 0.01, 9),
+            h3_id=h3.latlng_to_cell(0.0, 0.01, 9),
             resolution=9,
             eligibility_status="solvable",
             representative=(0.01, 0.0),
         ),
         SolvableCell(
-            h3_id_hex=h3.latlng_to_cell(0.01, 0.0, 9),
+            h3_id=h3.latlng_to_cell(0.01, 0.0, 9),
             resolution=9,
             eligibility_status="solvable",
             representative=(0.0, 0.01),
@@ -41,28 +101,24 @@ def make_cells() -> list[SolvableCell]:
     ]
 
 
-def make_plan() -> tuple[CandidatePlan, tuple[tuple[str, str], ...]]:
+def make_plan() -> tuple[CandidatePlan, tuple[tuple[int, int], ...]]:
     """Build the four-key directed product and return its off-diagonal keys."""
     cells = make_cells()
     scope = CandidateScope(
         mode="aoi_only",
-        origin_ids=tuple(cell.h3_id_hex for cell in cells),
-        destination_ids=tuple(cell.h3_id_hex for cell in cells),
+        origin_ids=tuple(cell.h3_id for cell in cells),
+        destination_ids=tuple(cell.h3_id for cell in cells),
         reach_distance_m=1000.0,
         resolution=9,
     )
     plan = build_candidate_plan(cells, scope, 1000.0, "m")
     retained = tuple(
-        pair.logical_od_key
-        for pair in plan.pairs
-        if pair.origin_h3_id != pair.destination_h3_id
+        pair.logical_od_key for pair in plan.pairs if pair.origin_h3_id != pair.destination_h3_id
     )
     return plan, retained
 
 
-def test_reconciliation_reuses_committed_resumes_recoverable_and_plans_missing_once() -> (
-    None
-):
+def test_reconciliation_reuses_committed_resumes_recoverable_and_plans_missing_once() -> None:
     plan, keys = make_plan()
     entries = [
         LedgerEvidence(keys[0], "fp", "committed"),
@@ -157,8 +213,8 @@ def test_zero_candidate_reconciliation_is_all_success() -> None:
     cell = make_cells()[0]
     scope = CandidateScope(
         mode="aoi_only",
-        origin_ids=(cell.h3_id_hex,),
-        destination_ids=(cell.h3_id_hex,),
+        origin_ids=(cell.h3_id,),
+        destination_ids=(cell.h3_id,),
         reach_distance_m=1000.0,
         resolution=9,
     )
@@ -215,9 +271,7 @@ def test_reconciliation_excludes_self_and_prefilter_pruned_pairs() -> None:
     assert result.expected_keys == result.planned_keys
 
 
-def test_missing_earlier_batch_key_does_not_shift_deterministic_batch_assignment() -> (
-    None
-):
+def test_missing_earlier_batch_key_does_not_shift_deterministic_batch_assignment() -> None:
     plan, keys = make_plan()
     all_planned = reconcile_candidate_work(plan, [], "fp", destination_batch_size=1)
     first_key = keys[0]
@@ -233,9 +287,7 @@ def test_missing_earlier_batch_key_does_not_shift_deterministic_batch_assignment
         destination_batch_size=1,
     )
     later_key = next(key for key in keys if key[0] == first_key[0] and key != first_key)
-    later_unit = next(
-        unit for unit in after_commit.work_units if later_key in unit.logical_od_keys
-    )
+    later_unit = next(unit for unit in after_commit.work_units if later_key in unit.logical_od_keys)
 
     assert later_unit.batch_index == 1
 
@@ -246,8 +298,8 @@ def test_resolved_limits_bound_default_destination_batches() -> None:
     cells = make_cells()
     scope = CandidateScope(
         mode="aoi_only",
-        origin_ids=tuple(cell.h3_id_hex for cell in cells),
-        destination_ids=tuple(cell.h3_id_hex for cell in cells),
+        origin_ids=tuple(cell.h3_id for cell in cells),
+        destination_ids=tuple(cell.h3_id for cell in cells),
         reach_distance_m=1000.0,
         resolution=9,
     )
@@ -278,9 +330,7 @@ def test_duplicate_ledger_evidence_for_same_fingerprint_is_rejected() -> None:
         reconcile_candidate_work(plan, duplicate, "fp", destination_batch_size=10)
 
 
-def test_synthetic_solver_handoff_excludes_actual_over_cutoff_cost_before_commit() -> (
-    None
-):
+def test_synthetic_solver_handoff_excludes_actual_over_cutoff_cost_before_commit() -> None:
     plan, keys = make_plan()
     solved_costs = {
         keys[0]: 999.0,
@@ -290,17 +340,13 @@ def test_synthetic_solver_handoff_excludes_actual_over_cutoff_cost_before_commit
 
     classified = classify_solved_costs(plan, solved_costs)
     committed_as_qualifying = [
-        pair.logical_od_key
-        for pair in classified.pairs
-        if pair.disposition.value == "qualifying"
+        pair.logical_od_key for pair in classified.pairs if pair.disposition.value == "qualifying"
     ]
 
     assert committed_as_qualifying == [keys[0], keys[1]]
     assert classified.summary.cutoff_excluded_count == 1
     assert (
-        next(
-            pair for pair in classified.pairs if pair.logical_od_key == keys[2]
-        ).solved_cost
+        next(pair for pair in classified.pairs if pair.logical_od_key == keys[2]).solved_cost
         == 1001.0
     )
 
@@ -321,8 +367,8 @@ def test_resume_restores_execution_limits_and_candidate_policy_without_reinferen
     )
     scope = CandidateScope(
         mode="aoi_only",
-        origin_ids=tuple(cell.h3_id_hex for cell in cells),
-        destination_ids=tuple(cell.h3_id_hex for cell in cells),
+        origin_ids=tuple(cell.h3_id for cell in cells),
+        destination_ids=tuple(cell.h3_id for cell in cells),
         reach_distance_m=1000.0,
         resolution=9,
     )
@@ -338,12 +384,8 @@ def test_resume_restores_execution_limits_and_candidate_policy_without_reinferen
     def fail_if_rederived(*args: object, **kwargs: object) -> float:
         raise AssertionError("Resume must use the saved reach without recalculation")
 
-    monkeypatch.setattr(
-        "h3_route_data_builder.od.candidates.cutoff_reach_m", fail_if_rederived
-    )
-    policy, restored_limits, restored_fingerprint = restore_candidate_policy(
-        plan.candidate_policy
-    )
+    monkeypatch.setattr("h3_route_data_builder.od.candidates.cutoff_reach_m", fail_if_rederived)
+    policy, restored_limits, restored_fingerprint = restore_candidate_policy(plan.candidate_policy)
     with pytest.raises(ValueError, match="use a distinct run"):
         restore_candidate_policy(plan.candidate_policy, {"cutoff": 2000.0})
 
@@ -351,8 +393,5 @@ def test_resume_restores_execution_limits_and_candidate_policy_without_reinferen
     assert policy["candidate_policy_version"] == "1"
     assert policy["cutoff"] == plan.cutoff
     assert policy["reach_distance_m"] == plan.scope.reach_distance_m
-    assert (
-        policy["prefilter_distance_error_bound_m"]
-        == plan.prefilter_distance_error_bound_m
-    )
+    assert policy["prefilter_distance_error_bound_m"] == plan.prefilter_distance_error_bound_m
     assert restored_fingerprint == plan.candidate_policy_fingerprint

@@ -6,6 +6,7 @@ import uuid
 import arcpy
 
 from h3_route_data_builder.eligibility.models import NetworkLocation
+from h3_route_data_builder.eligibility.cells import canonical_h3_ids
 from h3_route_data_builder.network.representatives import RepresentativeCandidate
 from h3_route_data_builder.utils import get_logger
 
@@ -30,24 +31,24 @@ def locate_representative_candidates(
     if not candidates:
         return None
     return locate_representative_candidates_by_cell(
-        {candidates[0].h3_id_hex: candidates},
+        {candidates[0].h3_id: candidates},
         network_dataset_path,
         travel_mode,
         snap_tolerance_m,
-    )[candidates[0].h3_id_hex]
+    )[candidates[0].h3_id]
 
 
 def locate_representative_candidates_by_cell(
-    candidates_by_cell: Mapping[str, list[RepresentativeCandidate]],
+    candidates_by_cell: Mapping[int, list[RepresentativeCandidate]],
     network_dataset_path: str,
     travel_mode: str,
     snap_tolerance_m: float,
-) -> dict[str, NetworkLocation | None]:
+) -> dict[int, NetworkLocation | None]:
     """Locate ranked representative candidates for many H3 cells in one ArcPy call.
 
     Candidate points are written to one temporary memory feature class. The input network
-    dataset is used read-only by Calculate Locations. Candidate order and H3 identity fields
-    are preserved so the first valid location per cell is chosen deterministically.
+    dataset is used read-only by Calculate Locations. Opaque candidate indices preserve
+    association with integer H3 keys and deterministic candidate ordering.
 
     Args:
         candidates_by_cell: H3 ID to centroid-distance/source/OID/measure-ranked candidates.
@@ -64,7 +65,8 @@ def locate_representative_candidates_by_cell(
         RuntimeError: If ArcPy cannot calculate locations or returns an incomplete schema.
     """
     ordered_candidates: list[RepresentativeCandidate] = []
-    result_by_cell: dict[str, NetworkLocation | None] = {
+    canonical_h3_ids(candidates_by_cell)
+    result_by_cell: dict[int, NetworkLocation | None] = {
         cell_id: None for cell_id in sorted(candidates_by_cell)
     }
     for cell_id in sorted(candidates_by_cell):
@@ -77,16 +79,14 @@ def locate_representative_candidates_by_cell(
                 candidate.pos_along,
             ),
         )
-        if any(candidate.h3_id_hex != cell_id for candidate in cell_candidates):
+        if any(candidate.h3_id != cell_id for candidate in cell_candidates):
             raise ValueError(f"Candidate H3 ID does not match mapping key {cell_id}")
         ordered_candidates.extend(cell_candidates)
 
     if not ordered_candidates:
         return result_by_cell
     if not network_dataset_path or not arcpy.Exists(network_dataset_path):
-        raise ValueError(
-            f"ArcPy cannot resolve network dataset: {network_dataset_path}"
-        )
+        raise ValueError(f"ArcPy cannot resolve network dataset: {network_dataset_path}")
     if not travel_mode:
         raise ValueError("travel_mode must be non-empty")
     if snap_tolerance_m < 0:
@@ -101,9 +101,7 @@ def locate_representative_candidates_by_cell(
         candidate.point_geometry.spatialReference != spatial_reference
         for candidate in ordered_candidates
     ):
-        raise ValueError(
-            "All representative candidates must use the same spatial reference"
-        )
+        raise ValueError("All representative candidates must use the same spatial reference")
 
     feature_class_name = f"representatives_{uuid.uuid4().hex}"
     feature_class = f"memory/{feature_class_name}"
@@ -114,16 +112,13 @@ def locate_representative_candidates_by_cell(
         spatial_reference=spatial_reference,
     )
     arcpy.management.AddField(feature_class, "candidate_index", "LONG")
-    arcpy.management.AddField(feature_class, "h3_id_hex", "TEXT", field_length=16)
     try:
         with arcpy.da.InsertCursor(
             feature_class,
-            ["candidate_index", "h3_id_hex", "SHAPE@"],
+            ["candidate_index", "SHAPE@"],
         ) as cursor:
             for candidate_index, candidate in enumerate(ordered_candidates):
-                cursor.insertRow(
-                    [candidate_index, candidate.h3_id_hex, candidate.point_geometry]
-                )
+                cursor.insertRow([candidate_index, candidate.point_geometry])
 
         try:
             arcpy.na.CalculateLocations(
@@ -144,25 +139,28 @@ def locate_representative_candidates_by_cell(
         missing_fields = [field for field in _LOCATION_FIELDS if field not in fields]
         if missing_fields:
             raise RuntimeError(
-                "Calculate Locations did not produce required fields: "
-                + ", ".join(missing_fields)
+                "Calculate Locations did not produce required fields: " + ", ".join(missing_fields)
             )
 
         located_by_index: dict[int, tuple[object, ...]] = {}
         with arcpy.da.SearchCursor(
             feature_class,
-            ["candidate_index", "h3_id_hex", *_LOCATION_FIELDS],
+            ["candidate_index", *_LOCATION_FIELDS],
         ) as cursor:
             for row in cursor:
-                candidate_index = int(row[0])
-                if row[1] != ordered_candidates[candidate_index].h3_id_hex:
+                candidate_index = row[0]
+                if (
+                    type(candidate_index) is not int
+                    or not 0 <= candidate_index < len(ordered_candidates)
+                    or candidate_index in located_by_index
+                ):
                     raise RuntimeError(
-                        "Calculate Locations changed candidate H3 identity"
+                        "Calculate Locations returned an invalid or duplicate candidate index"
                     )
-                located_by_index[candidate_index] = tuple(row[2:])
+                located_by_index[candidate_index] = tuple(row[1:])
 
         for candidate_index, candidate in enumerate(ordered_candidates):
-            if result_by_cell[candidate.h3_id_hex] is not None:
+            if result_by_cell[candidate.h3_id] is not None:
                 continue
             row = located_by_index.get(candidate_index)
             if row is None:
@@ -172,17 +170,14 @@ def locate_representative_candidates_by_cell(
                 logger.warning(
                     "Candidate %s for H3 %s was not located",
                     candidate_index,
-                    candidate.h3_id_hex,
+                    candidate.h3_id,
                 )
                 continue
-            if (
-                int(source_id) != candidate.source_id
-                or int(source_oid) != candidate.source_oid
-            ):
+            if int(source_id) != candidate.source_id or int(source_oid) != candidate.source_oid:
                 logger.warning(
                     "Candidate %s for H3 %s located on source %s OID %s instead of source %s OID %s",
                     candidate_index,
-                    candidate.h3_id_hex,
+                    candidate.h3_id,
                     source_id,
                     source_oid,
                     candidate.source_id,
@@ -193,7 +188,7 @@ def locate_representative_candidates_by_cell(
                 logger.warning(
                     "Candidate %s for H3 %s has invalid PosAlong %s",
                     candidate_index,
-                    candidate.h3_id_hex,
+                    candidate.h3_id,
                     pos_along,
                 )
                 continue
@@ -201,14 +196,14 @@ def locate_representative_candidates_by_cell(
                 logger.warning(
                     "Candidate %s for H3 %s snapped %.6f m beyond tolerance %.6f m",
                     candidate_index,
-                    candidate.h3_id_hex,
+                    candidate.h3_id,
                     distance_m,
                     snap_tolerance_m,
                 )
                 continue
 
             point = candidate.point_geometry.centroid
-            result_by_cell[candidate.h3_id_hex] = NetworkLocation(
+            result_by_cell[candidate.h3_id] = NetworkLocation(
                 x=float(point.X),
                 y=float(point.Y),
                 source_id=int(source_id),

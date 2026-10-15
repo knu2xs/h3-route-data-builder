@@ -1,6 +1,9 @@
 """Tests for atomic eligibility-part staging."""
 
 import json
+import hashlib
+from pathlib import Path
+from h3.api import basic_int as h3
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -26,15 +29,43 @@ from h3_route_data_builder.eligibility.run_state import (
     transition_partition,
 )
 from h3_route_data_builder.eligibility.staging import (
+    StagedPart,
     read_verified_staged_part,
     stage_table_batches,
     write_staged_part,
 )
+from h3_route_data_builder.eligibility.output import eligibility_results_to_table
+
+
+@pytest.mark.parametrize("resolution", range(16))
+def test_integer_eligibility_stage_round_trip_at_every_resolution(
+    tmp_path: Path,
+    integer_h3_cells: tuple[int, ...],
+    resolution: int,
+) -> None:
+    ids = integer_h3_cells[resolution * 4 + 2 : resolution * 4 + 4]
+    results = [
+        CellEligibilityResult(
+            h3_id=cell_id,
+            resolution=resolution,
+            eligibility_status=EligibilityStatus.INELIGIBLE,
+            eligibility_reason="no eligible edge",
+            intersecting_edge_count=0,
+        )
+        for cell_id in ids
+    ]
+    table = eligibility_results_to_table(
+        results,
+        {cell_id: (b"cell-wkb", b"centroid-wkb", None) for cell_id in ids},
+    )
+    (part,) = stage_table_batches(table, tmp_path, "integer-stage", 2, 2)
+    assert read_verified_staged_part(part).column("h3_id").to_pylist() == list(ids)
 
 
 def make_geoparquet_table(row_count: int) -> pa.Table:
     """Create a small WKB table with GeoParquet metadata for staging tests."""
     metadata = {
+        b"eligibility_schema_version": b"2",
         b"geo": json.dumps(
             {
                 "version": "1.0.0",
@@ -47,15 +78,18 @@ def make_geoparquet_table(row_count: int) -> pa.Table:
                     }
                 },
             }
-        ).encode("utf-8")
+        ).encode("utf-8"),
     }
     schema = pa.schema(
-        [pa.field("h3_id_hex", pa.string()), pa.field("geometry", pa.binary())],
+        [pa.field("h3_id", pa.uint64(), nullable=False), pa.field("geometry", pa.binary())],
         metadata=metadata,
     )
     return pa.Table.from_arrays(
         [
-            pa.array([f"cell-{index}" for index in range(row_count)]),
+            pa.array(
+                [h3.latlng_to_cell(0, index * 0.01, 9) for index in range(row_count)],
+                type=pa.uint64(),
+            ),
             pa.array([b"wkb"] * row_count),
         ],
         schema=schema,
@@ -77,13 +111,11 @@ def test_staged_part_is_atomic_and_returns_checksum(temp_dir) -> None:
 
 def test_staging_rejects_part_over_row_limit(temp_dir) -> None:
     with pytest.raises(ValueError, match="configured limit"):
-        write_staged_part(
-            make_geoparquet_table(2), temp_dir / "part.parquet", "part", 1
-        )
+        write_staged_part(make_geoparquet_table(2), temp_dir / "part.parquet", "part", 1)
 
 
 def test_staging_requires_geoparquet_metadata(temp_dir) -> None:
-    table = pa.table({"h3_id_hex": ["cell"]})
+    table = pa.table({"h3_id": ["cell"]})
 
     with pytest.raises(ValueError, match="GeoParquet schema metadata"):
         write_staged_part(table, temp_dir / "part.parquet", "part", 1)
@@ -100,21 +132,30 @@ def test_large_batch_is_split_deterministically_without_row_loss(temp_dir) -> No
     )
 
     assert [part.row_count for part in first_run] == [2, 2, 1]
-    assert [part.part_key for part in first_run] == [
-        part.part_key for part in second_run
-    ]
+    assert [part.part_key for part in first_run] == [part.part_key for part in second_run]
     staged_ids = [
         cell_id
         for part in first_run
-        for cell_id in read_verified_staged_part(part).column("h3_id_hex").to_pylist()
+        for cell_id in read_verified_staged_part(part).column("h3_id").to_pylist()
     ]
-    assert staged_ids == [f"cell-{index}" for index in range(5)]
+    assert staged_ids == [h3.latlng_to_cell(0, index * 0.01, 9) for index in range(5)]
+
+
+def test_legacy_staged_part_is_refused_without_rewriting_history(temp_dir) -> None:
+    table = make_geoparquet_table(1)
+    metadata = dict(table.schema.metadata)
+    metadata.pop(b"eligibility_schema_version")
+    path = temp_dir / "legacy.parquet"
+    pq.write_table(table.replace_schema_metadata(metadata), path)
+    before = path.read_bytes()
+    part = StagedPart("legacy", path, 1, hashlib.sha256(before).hexdigest())
+    with pytest.raises(ValueError, match="schema|fresh"):
+        read_verified_staged_part(part)
+    assert path.read_bytes() == before
 
 
 def test_staged_part_checksum_mismatch_is_rejected(temp_dir) -> None:
-    staged = write_staged_part(
-        make_geoparquet_table(1), temp_dir / "part.parquet", "part", 1
-    )
+    staged = write_staged_part(make_geoparquet_table(1), temp_dir / "part.parquet", "part", 1)
     staged.path.write_bytes(b"corrupted")
 
     with pytest.raises(ValueError, match="checksum mismatch"):
@@ -123,7 +164,7 @@ def test_staged_part_checksum_mismatch_is_rejected(temp_dir) -> None:
 
 def test_reconciliation_deduplicates_h3_cells_and_edge_identities() -> None:
     first = CellGeometryCandidate(
-        h3_id_hex="8928308280fffff",
+        h3_id=617700169958293503,
         resolution=9,
         cell_geometry=None,
         centroid_geometry=None,
@@ -134,7 +175,7 @@ def test_reconciliation_deduplicates_h3_cells_and_edge_identities() -> None:
         eligibility_reason="eligible edge intersects cell within AOI",
     )
     duplicate = CellGeometryCandidate(
-        h3_id_hex="8928308280FFFFF",
+        h3_id=617700169958293503,
         resolution=9,
         cell_geometry=None,
         centroid_geometry=None,
@@ -148,10 +189,8 @@ def test_reconciliation_deduplicates_h3_cells_and_edge_identities() -> None:
     )
 
     assert len(result) == 1
-    assert result[0].h3_id_hex == "8928308280fffff"
-    assert [
-        (edge.source_id, edge.source_oid) for edge in result[0].intersecting_edges
-    ] == [
+    assert result[0].h3_id == 617700169958293503
+    assert [(edge.source_id, edge.source_oid) for edge in result[0].intersecting_edges] == [
         (1, 10),
         (1, 11),
     ]
@@ -165,10 +204,10 @@ def test_reconciliation_rejects_missing_expected_partition() -> None:
         )
 
 
-def make_valid_cell_result(h3_id_hex: str) -> CellEligibilityResult:
+def make_valid_cell_result(h3_id: int) -> CellEligibilityResult:
     """Create one validated solvable result for finalization tests."""
     return CellEligibilityResult(
-        h3_id_hex=h3_id_hex,
+        h3_id=h3_id,
         resolution=9,
         eligibility_status=EligibilityStatus.SOLVABLE,
         eligibility_reason="eligible edge intersects cell within AOI",
@@ -198,10 +237,10 @@ def mark_partition_reconciled(run_state, partition_key: str) -> None:
 def test_handoff_counts_unique_validated_solvable_cells(temp_dir) -> None:
     run_state = create_run_state("run-1", ["partition-a"], total_output_hard_cap=2)
     mark_partition_reconciled(run_state, "partition-a")
-    first = make_valid_cell_result("8928308280fffff")
-    second = make_valid_cell_result("8928308280bffff")
+    first = make_valid_cell_result(617700169958293503)
+    second = make_valid_cell_result(617700169958031359)
     ineligible = CellEligibilityResult(
-        h3_id_hex="8928308280affff",
+        h3_id=h3.latlng_to_cell(0, 0, 9),
         resolution=9,
         eligibility_status=EligibilityStatus.INELIGIBLE,
         eligibility_reason="no eligible edge",
@@ -227,8 +266,8 @@ def test_total_cap_overflow_fails_run_without_partial_handoff() -> None:
         finalize_eligibility_results(
             run_state,
             [
-                make_valid_cell_result("8928308280fffff"),
-                make_valid_cell_result("8928308280bffff"),
+                make_valid_cell_result(617700169958293503),
+                make_valid_cell_result(617700169958031359),
             ],
             snap_tolerance_m=0.01,
         )
@@ -237,15 +276,13 @@ def test_total_cap_overflow_fails_run_without_partial_handoff() -> None:
 
 
 def test_unreconciled_partition_keeps_run_incomplete() -> None:
-    run_state = create_run_state(
-        "run-1", ["partition-a", "partition-b"], total_output_hard_cap=2
-    )
+    run_state = create_run_state("run-1", ["partition-a", "partition-b"], total_output_hard_cap=2)
     mark_partition_reconciled(run_state, "partition-a")
 
     with pytest.raises(ValueError, match="unreconciled partitions"):
         finalize_eligibility_results(
             run_state,
-            [make_valid_cell_result("8928308280fffff")],
+            [make_valid_cell_result(617700169958293503)],
             snap_tolerance_m=0.01,
         )
 

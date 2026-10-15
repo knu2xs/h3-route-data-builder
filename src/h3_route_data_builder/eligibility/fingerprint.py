@@ -10,6 +10,7 @@ logger = get_logger(__name__, level="DEBUG", add_stream_handler=False)
 
 
 _REQUIRED_SOFTWARE_VERSIONS = {"python", "arcgis_pro", "h3", "package"}
+ELIGIBILITY_SCHEMA_VERSION = "2"
 
 
 def build_input_fingerprint(
@@ -49,9 +50,7 @@ def build_input_fingerprint(
     }
     missing_values = [name for name, value in required_values.items() if not value]
     if missing_values:
-        raise ValueError(
-            f"Required fingerprint values are empty: {', '.join(missing_values)}"
-        )
+        raise ValueError(f"Required fingerprint values are empty: {', '.join(missing_values)}")
     if h3_resolution < 0:
         raise ValueError("h3_resolution must be non-negative")
     missing_versions = sorted(_REQUIRED_SOFTWARE_VERSIONS - software_versions.keys())
@@ -61,6 +60,7 @@ def build_input_fingerprint(
         raise ValueError("Required software versions must be non-empty")
 
     payload = {
+        "identity_encoding_version": 2,
         "aoi_fingerprint": aoi_fingerprint,
         "network_fingerprint": network_fingerprint,
         "travel_mode": travel_mode,

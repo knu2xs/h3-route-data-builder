@@ -5,6 +5,7 @@ from typing import Any
 
 import arcpy
 
+from h3_route_data_builder.eligibility.cells import canonical_h3_ids
 from h3_route_data_builder.eligibility.models import EdgeIntersectionEvidence
 from h3_route_data_builder.utils import get_logger
 
@@ -15,7 +16,7 @@ logger = get_logger(__name__, level="DEBUG", add_stream_handler=False)
 class RepresentativeCandidate:
     """Nearest on-network point candidate for one intersecting edge."""
 
-    h3_id_hex: str
+    h3_id: int
     point_geometry: arcpy.Geometry
     source_id: int
     source_oid: int
@@ -26,17 +27,15 @@ class RepresentativeCandidate:
 
 
 def rank_representative_candidates(
-    h3_id_hex: str,
+    h3_id: int,
     cell_centroid: arcpy.Geometry,
-    intersecting_edges: (
-        list[EdgeIntersectionEvidence] | tuple[EdgeIntersectionEvidence, ...]
-    ),
+    intersecting_edges: list[EdgeIntersectionEvidence] | tuple[EdgeIntersectionEvidence, ...],
     snap_tolerance_m: float,
 ) -> list[RepresentativeCandidate]:
     """Build candidates only on eligible edge portions intersecting the cell in the AOI.
 
     Args:
-        h3_id_hex: Canonical H3 cell identity.
+        h3_id: Canonical H3 cell identity.
         cell_centroid: Cell centroid in WGS 84 / EPSG:4326.
         intersecting_edges: Eligible in-AOI edge intersection evidence for the cell.
         snap_tolerance_m: Maximum allowed distance from the representative to its source edge.
@@ -47,8 +46,7 @@ def rank_representative_candidates(
     Raises:
         ValueError: If the centroid/reference is invalid or tolerance is negative.
     """
-    if not h3_id_hex:
-        raise ValueError("h3_id_hex must be non-empty")
+    canonical_h3_ids((h3_id,))
     if snap_tolerance_m < 0:
         raise ValueError("snap_tolerance_m must be non-negative")
     if cell_centroid is None or cell_centroid.pointCount == 0:
@@ -69,8 +67,8 @@ def rank_representative_candidates(
             intersection_geometry,
             cell_centroid,
         ):
-            point_on_edge, edge_measure, _, right_of_edge = (
-                edge_geometry.queryPointAndDistance(point_on_intersection, True)
+            point_on_edge, edge_measure, _, right_of_edge = edge_geometry.queryPointAndDistance(
+                point_on_intersection, True
             )
             snap_distance_m = _geodesic_distance_m(
                 point_on_intersection,
@@ -79,7 +77,7 @@ def rank_representative_candidates(
             if snap_distance_m > snap_tolerance_m:
                 logger.debug(
                     "Skipping representative for H3 %s on source %s OID %s: snap %.6f m exceeds %.6f m",
-                    h3_id_hex,
+                    h3_id,
                     edge_evidence.source_id,
                     edge_evidence.source_oid,
                     snap_distance_m,
@@ -88,7 +86,7 @@ def rank_representative_candidates(
                 continue
             candidates.append(
                 RepresentativeCandidate(
-                    h3_id_hex=h3_id_hex,
+                    h3_id=h3_id,
                     point_geometry=point_on_edge,
                     source_id=edge_evidence.source_id,
                     source_oid=edge_evidence.source_oid,
@@ -126,14 +124,10 @@ def _nearest_intersection_points(
         for part_index in range(intersection_geometry.partCount):
             part = intersection_geometry.getPart(part_index)
             for point in part:
-                points.append(
-                    arcpy.PointGeometry(point, intersection_geometry.spatialReference)
-                )
+                points.append(arcpy.PointGeometry(point, intersection_geometry.spatialReference))
         if not points:
             return []
-        point_distances = [
-            _geodesic_distance_m(cell_centroid, point) for point in points
-        ]
+        point_distances = [_geodesic_distance_m(cell_centroid, point) for point in points]
         minimum_distance = min(point_distances)
         return [
             point
@@ -146,22 +140,16 @@ def _nearest_intersection_points(
             False,
         )
         return [nearest_point]
-    raise ValueError(
-        f"Unsupported edge/cell intersection geometry: {intersection_geometry.type}"
-    )
+    raise ValueError(f"Unsupported edge/cell intersection geometry: {intersection_geometry.type}")
 
 
 def _validate_matching_reference(first_geometry: Any, second_geometry: Any) -> None:
     """Ensure both geometries have the same declared CRS."""
     second_reference = second_geometry.spatialReference
     if second_reference is None or second_reference.name == "Unknown":
-        raise ValueError(
-            "Representative input geometry has an unknown spatial reference"
-        )
+        raise ValueError("Representative input geometry has an unknown spatial reference")
     if first_geometry.spatialReference != second_reference:
-        raise ValueError(
-            "Representative input geometries must use the same spatial reference"
-        )
+        raise ValueError("Representative input geometries must use the same spatial reference")
 
 
 def _geodesic_distance_m(first_point: Any, second_point: Any) -> float:

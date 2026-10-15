@@ -23,8 +23,7 @@ def _geometry_metadata(geometry_type: str) -> dict[str, Any]:
 
 SOLVABLE_CELLS_SCHEMA = pa.schema(
     [
-        pa.field("h3_id_hex", pa.string(), nullable=False),
-        pa.field("h3_id_uint64", pa.uint64()),
+        pa.field("h3_id", pa.uint64(), nullable=False),
         pa.field("resolution", pa.uint8(), nullable=False),
         pa.field("cell_geometry", pa.binary(), nullable=False),
         pa.field("centroid_geometry", pa.binary(), nullable=False),
@@ -59,15 +58,13 @@ SOLVABLE_CELLS_SCHEMA = pa.schema(
 
 OD_FACTS_SCHEMA = pa.schema(
     [
-        pa.field("origin_h3_id_hex", pa.string(), nullable=False),
-        pa.field("destination_h3_id_hex", pa.string(), nullable=False),
+        pa.field("origin_h3_id", pa.uint64(), nullable=False),
+        pa.field("destination_h3_id", pa.uint64(), nullable=False),
         pa.field("travel_mode", pa.string(), nullable=False),
         pa.field("network_distance_m", pa.float64()),
         pa.field("network_time_s", pa.float64()),
         pa.field("origin_representative_snap_distance_m", pa.float64(), nullable=False),
-        pa.field(
-            "destination_representative_snap_distance_m", pa.float64(), nullable=False
-        ),
+        pa.field("destination_representative_snap_distance_m", pa.float64(), nullable=False),
         pa.field("solve_status", pa.string(), nullable=False),
         pa.field("work_item_id", pa.string()),
         pa.field("build_fingerprint", pa.string(), nullable=False),
@@ -88,9 +85,7 @@ def schema_for(table_name: str) -> pa.Schema:
     raise ValueError(f"Unknown publication table: {table_name}")
 
 
-def geoparquet_metadata(
-    schema: pa.Schema, extents: dict[str, list[float]]
-) -> dict[str, Any]:
+def geoparquet_metadata(schema: pa.Schema, extents: dict[str, list[float]]) -> dict[str, Any]:
     """Return file-level GeoParquet 1.1 metadata with per-column bounding boxes."""
     existing = schema.metadata or {}
     raw_geo = existing.get(b"geo")

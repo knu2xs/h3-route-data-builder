@@ -22,6 +22,11 @@ from h3_route_data_builder.od.results import (
 )
 from h3_route_data_builder.od.solving import solve_work_item
 
+ORIGIN = 617700169958293503
+FAR = 617700169958555647
+INVALID = 617700169958817791
+NEAR = 617700169959079935
+
 
 def test_compatibility_fingerprint_excludes_run_provenance() -> None:
     result_inputs = {
@@ -49,9 +54,7 @@ def test_compatibility_fingerprint_excludes_run_provenance() -> None:
         },
     }
 
-    assert compatibility_fingerprint(result_inputs) == compatibility_fingerprint(
-        expanded
-    )
+    assert compatibility_fingerprint(result_inputs) == compatibility_fingerprint(expanded)
 
 
 def test_compatibility_fingerprint_changes_for_result_affecting_inputs() -> None:
@@ -72,10 +75,8 @@ def test_compatibility_fingerprint_changes_for_result_affecting_inputs() -> None
         (10.01, OutcomeClass.CUTOFF_EXCLUDED),
     ],
 )
-def test_actual_cost_controls_cutoff_classification(
-    cost: float, expected: OutcomeClass
-) -> None:
-    outcome = classify_actual_cost(("a", "b"), cost, 10.0, "m")
+def test_actual_cost_controls_cutoff_classification(cost: float, expected: OutcomeClass) -> None:
+    outcome = classify_actual_cost((ORIGIN, NEAR), cost, 10.0, "m")
 
     assert outcome.classification is expected
     assert outcome.actual_cost == cost
@@ -85,12 +86,12 @@ def test_actual_cost_controls_cutoff_classification(
 @pytest.mark.parametrize("cost", [-1.0, math.nan, math.inf])
 def test_invalid_actual_cost_is_rejected(cost: float) -> None:
     with pytest.raises(ValueError, match="finite non-negative"):
-        classify_actual_cost(("a", "b"), cost, 10.0, "m")
+        classify_actual_cost((ORIGIN, NEAR), cost, 10.0, "m")
 
 
 def test_unroutable_outcomes_have_no_route_cost() -> None:
     outcome = SolveOutcome(
-        logical_od_key=("a", "b"),
+        logical_od_key=(ORIGIN, NEAR),
         classification=OutcomeClass.UNLOCATED,
         actual_cost=None,
         cost_unit=None,
@@ -106,7 +107,7 @@ def test_network_adapter_records_missing_representative_as_unlocated(
 ) -> None:
     (outcome,) = solve_network_od(
         network_dataset_path="network",
-        expected_keys=(("origin", "destination"),),
+        expected_keys=((ORIGIN, NEAR),),
         representatives={},
         travel_mode="driving",
         cost_attribute="TravelTime",
@@ -116,14 +117,25 @@ def test_network_adapter_records_missing_representative_as_unlocated(
         scratch_directory=tmp_path,
     )
 
-    assert outcome.logical_od_key == ("origin", "destination")
+    assert outcome.logical_od_key == (ORIGIN, NEAR)
     assert outcome.classification is OutcomeClass.UNLOCATED
     assert outcome.actual_cost is None
     assert outcome.diagnostic
 
 
+@pytest.mark.parametrize(
+    "invalid_output",
+    [
+        None,
+        "unknown_status",
+        "duplicate_status",
+        "missing_status",
+        "unknown_route",
+        "duplicate_route",
+    ],
+)
 def test_network_adapter_solves_all_destinations_without_applying_cutoff(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, invalid_output: str | None
 ) -> None:
     solver_instances: list[Any] = []
     inserted_rows: list[tuple[Any, ...]] = []
@@ -159,6 +171,9 @@ def test_network_adapter_solves_all_destinations_without_applying_cutoff(
             )
 
     arcpy = ModuleType("arcpy")
+    arcpy.AddMessage = lambda message: None
+    arcpy.AddWarning = lambda message: None
+    arcpy.AddError = lambda message: None
     arcpy.Exists = lambda path: True
     arcpy.ExecuteError = type("ExecuteError", (Exception,), {})
     arcpy.GetMessages = lambda severity: ""
@@ -173,12 +188,23 @@ def test_network_adapter_solves_all_destinations_without_applying_cutoff(
     def search_cursor(path: str, fields: list[str]) -> Cursor:
         if fields == ["Name", "Status"]:
             rows = (
-                (("origin", 0),)
+                (("endpoint-0", 0),)
                 if path.endswith("origin_status")
-                else (("far", 0), ("invalid", 1), ("near", 0))
+                else (("endpoint-1", 0), ("endpoint-2", 1), ("endpoint-3", 0))
             )
+            if path.endswith("destination_status"):
+                if invalid_output == "unknown_status":
+                    rows = (*rows[:-1], ("unknown", 0))
+                elif invalid_output == "duplicate_status":
+                    rows = (*rows, rows[0])
+                elif invalid_output == "missing_status":
+                    rows = rows[:-1]
         else:
-            rows = (("origin", "near", 5.0), ("origin", "far", 12.0))
+            rows = (("endpoint-0", "endpoint-3", 5.0), ("endpoint-0", "endpoint-1", 12.0))
+            if invalid_output == "unknown_route":
+                rows = (("endpoint-0", "unknown", 5.0),)
+            elif invalid_output == "duplicate_route":
+                rows = (*rows, rows[0])
         return Cursor(rows)
 
     arcpy.da = SimpleNamespace(
@@ -206,9 +232,7 @@ def test_network_adapter_solves_all_destinations_without_applying_cutoff(
         DistanceUnits=SimpleNamespace(Meters="meters"),
     )
     arcpy.na = SimpleNamespace(
-        GetTravelModes=lambda network_path: {
-            "driving": '{"impedanceAttributeName":"TravelTime"}'
-        }
+        GetTravelModes=lambda network_path: {"driving": '{"impedanceAttributeName":"TravelTime"}'}
     )
     monkeypatch.setitem(sys.modules, "arcpy", arcpy)
 
@@ -222,14 +246,28 @@ def test_network_adapter_solves_all_destinations_without_applying_cutoff(
             side_of_edge=1,
             snap_distance_m=0.0,
         )
-        for index, endpoint in enumerate(("origin", "near", "far", "invalid"), start=1)
+        for index, endpoint in enumerate((ORIGIN, NEAR, FAR, INVALID), start=1)
     }
+    if invalid_output is not None:
+        with pytest.raises(RuntimeError, match="unknown|duplicate|omitted"):
+            solve_network_od(
+                "network",
+                ((ORIGIN, NEAR), (ORIGIN, FAR), (ORIGIN, INVALID)),
+                representatives,
+                "driving",
+                "TravelTime",
+                "minutes",
+                10.0,
+                "projected-reference",
+                tmp_path,
+            )
+        return
     outcomes = solve_network_od(
         network_dataset_path="network",
         expected_keys=(
-            ("origin", "near"),
-            ("origin", "far"),
-            ("origin", "invalid"),
+            (ORIGIN, NEAR),
+            (ORIGIN, FAR),
+            (ORIGIN, INVALID),
         ),
         representatives=representatives,
         travel_mode="driving",
@@ -243,6 +281,17 @@ def test_network_adapter_solves_all_destinations_without_applying_cutoff(
     assert solver_instances[0].defaultDestinationCount == 3
     assert solver_instances[0].defaultImpedanceCutoff is None
     assert solver_instances[0].timeUnits == "minutes"
+    assert [outcome.logical_od_key for outcome in outcomes] == [
+        (ORIGIN, NEAR),
+        (ORIGIN, FAR),
+        (ORIGIN, INVALID),
+    ]
+    assert {row[0] for row in inserted_rows} == {
+        "endpoint-0",
+        "endpoint-1",
+        "endpoint-2",
+        "endpoint-3",
+    }
     assert [row[1:5] for row in inserted_rows] == [
         (1, 1, 0.5, 1),
         (1, 3, 0.5, 1),
@@ -277,6 +326,7 @@ def test_network_adapter_solves_a_located_pair_on_configured_network(
         "origin": (-73.9857, 40.7484),
         "destination": (-73.9772, 40.7527),
     }
+    ids_by_label = {"origin": ORIGIN, "destination": NEAR}
     with arcpy.da.InsertCursor(feature_class, ["Name", "SHAPE@"]) as cursor:
         for endpoint, (x, y) in coordinates.items():
             point = arcpy.PointGeometry(arcpy.Point(x, y), network_reference)
@@ -309,7 +359,7 @@ def test_network_adapter_solves_a_located_pair_on_configured_network(
                 side,
                 snap_distance,
             ) in cursor:
-                representatives[endpoint] = NetworkLocation(
+                representatives[ids_by_label[endpoint]] = NetworkLocation(
                     x=xy[0],
                     y=xy[1],
                     source_id=source_id,
@@ -318,12 +368,10 @@ def test_network_adapter_solves_a_located_pair_on_configured_network(
                     side_of_edge=side,
                     snap_distance_m=snap_distance,
                 )
-        mode = json.loads(
-            str(arcpy.na.GetTravelModes(real_network_dataset)[travel_mode])
-        )
+        mode = json.loads(str(arcpy.na.GetTravelModes(real_network_dataset)[travel_mode]))
         (outcome,) = solve_network_od(
             network_dataset_path=real_network_dataset,
-            expected_keys=(("origin", "destination"),),
+            expected_keys=((ORIGIN, NEAR),),
             representatives=representatives,
             travel_mode=travel_mode,
             cost_attribute=mode["impedanceAttributeName"],
@@ -342,7 +390,7 @@ def test_network_adapter_solves_a_located_pair_on_configured_network(
 
 def test_coordinator_solves_in_isolated_scratch_and_commits(tmp_path) -> None:
     ledger = ODLedger(tmp_path / "ledger.sqlite")
-    work = ledger.plan_work("fp", "a", ("b",), 10.0, "m")
+    work = ledger.plan_work("fp", ORIGIN, (NEAR,), 10.0, "m")
     scratch_root = tmp_path / "scratch"
     scratch_root.mkdir()
     observed_scratch = []
@@ -351,9 +399,7 @@ def test_coordinator_solves_in_isolated_scratch_and_commits(tmp_path) -> None:
         observed_scratch.append(scratch_directory)
         assert scratch_directory.parent == scratch_root
         assert scratch_directory.is_dir()
-        return (
-            classify_actual_cost(work_item.expected_logical_od_keys[0], 5.0, 10.0, "m"),
-        )
+        return (classify_actual_cost(work_item.expected_logical_od_keys[0], 5.0, 10.0, "m"),)
 
     part_id = solve_work_item(
         ledger, work.work_id, "serial-coordinator", solver, 60.0, scratch_root
@@ -367,7 +413,7 @@ def test_coordinator_solves_in_isolated_scratch_and_commits(tmp_path) -> None:
 
 def test_system_solve_failure_is_durable_and_not_a_route_fact(tmp_path) -> None:
     ledger = ODLedger(tmp_path / "ledger.sqlite")
-    work = ledger.plan_work("fp", "a", ("b",), 10.0, "m")
+    work = ledger.plan_work("fp", ORIGIN, (NEAR,), 10.0, "m")
 
     def fail_solve(work_item, scratch_directory):
         raise OSError("synthetic network failure")

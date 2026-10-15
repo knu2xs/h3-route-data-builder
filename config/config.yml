@@ -53,6 +53,12 @@ environments:
       restrictions: []
       prefilter_distance_error_bound_m: null  # Caller-asserted error bound; null retains all pairs
 
+    parallel_solving:
+      enabled: null  # Null/absent enables solves; only false disables them (preparation remains eligible)
+      max_workers: 2
+      probe_timeout_s: 60
+      shutdown_grace_s: 10
+
     eligibility:
       representative_policy: "nearest_centroid_then_source_id_oid_measure"
 

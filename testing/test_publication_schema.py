@@ -14,8 +14,7 @@ from h3_route_data_builder.publication.schema import (
 
 def test_cell_schema_has_exact_contract_types_and_required_geometry_fields() -> None:
     assert SOLVABLE_CELLS_SCHEMA.names == [
-        "h3_id_hex",
-        "h3_id_uint64",
+        "h3_id",
         "resolution",
         "cell_geometry",
         "centroid_geometry",
@@ -31,7 +30,6 @@ def test_cell_schema_has_exact_contract_types_and_required_geometry_fields() -> 
         "eligibility_fingerprint",
     ]
     assert [field.type for field in SOLVABLE_CELLS_SCHEMA] == [
-        pa.string(),
         pa.uint64(),
         pa.uint8(),
         pa.binary(),
@@ -47,18 +45,15 @@ def test_cell_schema_has_exact_contract_types_and_required_geometry_fields() -> 
         pa.string(),
         pa.string(),
     ]
-    assert all(
-        not field.nullable
-        for field in SOLVABLE_CELLS_SCHEMA
-        if field.name != "h3_id_uint64"
-    )
-    assert SOLVABLE_CELLS_SCHEMA.field("h3_id_uint64").nullable
+    assert all(not field.nullable for field in SOLVABLE_CELLS_SCHEMA)
+    assert SOLVABLE_CELLS_SCHEMA.field("h3_id").type == pa.uint64()
+    assert SOLVABLE_CELLS_SCHEMA.metadata[b"schema_version"] == b"2.0.0"
 
 
 def test_fact_schema_is_geometry_free_and_direction_sensitive() -> None:
     assert OD_FACTS_SCHEMA.names == [
-        "origin_h3_id_hex",
-        "destination_h3_id_hex",
+        "origin_h3_id",
+        "destination_h3_id",
         "travel_mode",
         "network_distance_m",
         "network_time_s",
@@ -69,6 +64,10 @@ def test_fact_schema_is_geometry_free_and_direction_sensitive() -> None:
         "build_fingerprint",
     ]
     assert not any("geometry" in name for name in OD_FACTS_SCHEMA.names)
+    for name in ("origin_h3_id", "destination_h3_id"):
+        assert OD_FACTS_SCHEMA.field(name).type == pa.uint64()
+        assert not OD_FACTS_SCHEMA.field(name).nullable
+    assert OD_FACTS_SCHEMA.metadata[b"schema_version"] == b"2.0.0"
     assert schema_for("od_facts") is OD_FACTS_SCHEMA
     assert schema_for("solvable_cells") is SOLVABLE_CELLS_SCHEMA
 

@@ -10,6 +10,7 @@ import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from h3_route_data_builder.eligibility.cells import canonical_h3_ids
 from h3_route_data_builder.publication.models import (
     CELL_SCHEMA_VERSION,
     FACT_SCHEMA_VERSION,
@@ -70,19 +71,24 @@ def write_table(
     if row_group_size <= 0 or part_row_limit <= 0:
         raise ValueError("row_group_size and part_row_limit must be positive")
     expected_schema = schema_for(table_name)
-    if not table.schema.remove_metadata().equals(expected_schema.remove_metadata()):
-        raise ValueError(
-            f"{table_name} table does not match its canonical Arrow schema"
-        )
+    if (
+        not table.schema.remove_metadata().equals(expected_schema.remove_metadata())
+        or (table.schema.metadata or {}).get(b"schema_version")
+        != expected_schema.metadata[b"schema_version"]
+    ):
+        raise ValueError(f"{table_name} table does not match its canonical Arrow schema")
+    columns = (
+        ("h3_id",) if table_name == "solvable_cells" else ("origin_h3_id", "destination_h3_id")
+    )
+    for column in columns:
+        canonical_h3_ids(table.column(column).to_pylist())
     destination = Path(output_path)
     if partition_by_origin:
         if table_name != "od_facts":
             raise ValueError("Only od_facts can be partitioned by origin")
         parts: list[PublishedPart] = []
-        origin_rows: dict[str, list[int]] = {}
-        for row_index, origin in enumerate(
-            table.column("origin_h3_id_hex").to_pylist()
-        ):
+        origin_rows: dict[int, list[int]] = {}
+        for row_index, origin in enumerate(table.column("origin_h3_id").to_pylist()):
             origin_rows.setdefault(origin, []).append(row_index)
         for origin in sorted(origin_rows):
             origin_table = table.take(pa.array(origin_rows[origin], type=pa.int64()))
@@ -90,9 +96,7 @@ def write_table(
                 range(0, origin_table.num_rows, part_row_limit)
             ):
                 part_path = (
-                    destination
-                    / f"origin_h3_id_hex={origin}"
-                    / f"part-{part_index:05d}.parquet"
+                    destination / f"origin_h3_id={origin}" / f"part-{part_index:05d}.parquet"
                 )
                 parts.append(
                     _write_one(
@@ -112,7 +116,7 @@ def _write_one(
     destination: Path,
     table_name: str,
     row_group_size: int,
-    origin_ids: tuple[str, ...],
+    origin_ids: tuple[int, ...],
 ) -> PublishedPart:
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_name(f".{destination.name}.{os.getpid()}.tmp")
@@ -130,22 +134,16 @@ def _write_one(
         checksum = _sha256_file(temporary)
         os.replace(temporary, destination)
     except Exception as exc:
-        message = (
-            f"Failed to write {table_name} GeoParquet table at {destination}: {exc}"
-        )
+        message = f"Failed to write {table_name} GeoParquet table at {destination}: {exc}"
         logger.error(message)
         if temporary.exists():
             temporary.unlink()
         raise OSError(message) from exc
     extent = _combined_extent(extents.values()) if extents else None
-    schema_version = (
-        CELL_SCHEMA_VERSION if table_name == "solvable_cells" else FACT_SCHEMA_VERSION
-    )
+    schema_version = CELL_SCHEMA_VERSION if table_name == "solvable_cells" else FACT_SCHEMA_VERSION
     recorded_origins = origin_ids
     if table_name == "od_facts" and not recorded_origins:
-        recorded_origins = tuple(
-            sorted(set(table.column("origin_h3_id_hex").to_pylist()))
-        )
+        recorded_origins = tuple(sorted(set(table.column("origin_h3_id").to_pylist())))
     return PublishedPart(
         table_name=table_name,
         path=destination,

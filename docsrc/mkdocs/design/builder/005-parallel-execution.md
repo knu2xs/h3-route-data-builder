@@ -1,5 +1,10 @@
 # Feature 005: Parallel Execution
 
+Feature 006 carries integer keys and representative maps through preparation and spawned
+assignments. Network Analyst TEXT names use assignment-local opaque labels, mapped back
+immediately to validated integer H3 IDs for status and route output. H3 values never travel
+through floating-point geodatabase fields. Coordinator ownership and parallel policy below are unchanged.
+
 - Maintain a one-process reference implementation.
 - Use processes, not shared-thread assumptions, for ArcPy solve workers.
 - Give every worker a unique scratch directory and geodatabase.

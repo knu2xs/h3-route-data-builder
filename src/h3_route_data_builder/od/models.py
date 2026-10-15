@@ -31,14 +31,14 @@ class SolvableCell:
     """Feature 001 cell reference used by portable candidate logic.
 
     Args:
-        h3_id_hex: H3 cell ID in hexadecimal form.
+        h3_id: Exact integer H3 cell identity.
         resolution: Cell resolution.
         eligibility_status: Feature 001 eligibility outcome.
         representative: Deterministic WGS 84 representative as (longitude, latitude).
         cell_geometry: Optional ArcPy geometry, only consumed by network geometry functions.
     """
 
-    h3_id_hex: str
+    h3_id: int
     resolution: int
     eligibility_status: str
     representative: tuple[float, float] | None
@@ -50,8 +50,8 @@ class CandidateScope:
     """AOI-derived ordered endpoint sets and conservative surrounding extent."""
 
     mode: CandidateMode | str
-    origin_ids: tuple[str, ...]
-    destination_ids: tuple[str, ...]
+    origin_ids: tuple[int, ...]
+    destination_ids: tuple[int, ...]
     reach_distance_m: float
     resolution: int
     maximum_origin_offset_m: float = 0.0
@@ -63,14 +63,14 @@ class CandidateScope:
 class DirectedPair:
     """One ordered origin/destination candidate and its current disposition."""
 
-    origin_h3_id: str
-    destination_h3_id: str
+    origin_h3_id: int
+    destination_h3_id: int
     disposition: CandidateDisposition
     straight_line_lower_bound_m: float | None = None
     solved_cost: float | None = None
 
     @property
-    def logical_od_key(self) -> tuple[str, str]:
+    def logical_od_key(self) -> tuple[int, int]:
         """Return the deterministic ordered pair identity."""
         return (self.origin_h3_id, self.destination_h3_id)
 
@@ -150,7 +150,7 @@ class CandidatePlan:
 class LedgerEvidence:
     """One Feature 003 ledger observation for a logical pair key."""
 
-    logical_od_key: tuple[str, str]
+    logical_od_key: tuple[int, int]
     dataset_fingerprint: str
     state: str
     invalidated: bool = False
@@ -161,23 +161,23 @@ class LedgerWorkUnit:
     """Deterministic per-origin destination batch to be newly scheduled."""
 
     dataset_fingerprint: str
-    origin_h3_id: str
+    origin_h3_id: int
     batch_index: int
-    destination_ids: tuple[str, ...]
-    logical_od_keys: tuple[tuple[str, str], ...]
+    destination_ids: tuple[int, ...]
+    logical_od_keys: tuple[tuple[int, int], ...]
 
 
 @dataclass(frozen=True)
 class CandidateReconciliation:
     """Expected retained keys partitioned by Feature 003 ledger disposition."""
 
-    expected_keys: tuple[tuple[str, str], ...]
-    reused_keys: tuple[tuple[str, str], ...]
-    resumed_keys: tuple[tuple[str, str], ...]
-    terminal_keys: tuple[tuple[str, str], ...]
-    planned_keys: tuple[tuple[str, str], ...]
-    retryable_keys: tuple[tuple[str, str], ...]
-    unresolved_keys: tuple[tuple[str, str], ...]
+    expected_keys: tuple[tuple[int, int], ...]
+    reused_keys: tuple[tuple[int, int], ...]
+    resumed_keys: tuple[tuple[int, int], ...]
+    terminal_keys: tuple[tuple[int, int], ...]
+    planned_keys: tuple[tuple[int, int], ...]
+    retryable_keys: tuple[tuple[int, int], ...]
+    unresolved_keys: tuple[tuple[int, int], ...]
     completion_status: str
     work_units: tuple[LedgerWorkUnit, ...]
     summary: dict[str, int]

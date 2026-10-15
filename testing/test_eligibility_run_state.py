@@ -1,6 +1,7 @@
 """Tests for eligibility run lifecycle and persistence."""
 
 import pytest
+import json
 
 from h3_route_data_builder.eligibility.models import (
     PartitionStatus,
@@ -23,18 +24,14 @@ def reconcile_partition(run_state, partition_key: str) -> None:
 
 
 def test_run_state_sorts_expected_partitions() -> None:
-    run_state = create_run_state(
-        "run-1", ["part-b", "part-a"], total_output_hard_cap=10
-    )
+    run_state = create_run_state("run-1", ["part-b", "part-a"], total_output_hard_cap=10)
 
     assert run_state.expected_partition_keys == ("part-a", "part-b")
     assert run_state.status == RunStatus.PROCESSING
 
 
 def test_run_cannot_complete_before_every_partition_reconciles() -> None:
-    run_state = create_run_state(
-        "run-1", ["part-a", "part-b"], total_output_hard_cap=10
-    )
+    run_state = create_run_state("run-1", ["part-a", "part-b"], total_output_hard_cap=10)
     reconcile_partition(run_state, "part-a")
 
     with pytest.raises(ValueError, match="unreconciled partitions"):
@@ -61,6 +58,21 @@ def test_completed_run_state_round_trips_through_json(temp_dir) -> None:
     restored = load_run_state(state_path)
 
     assert restored == run_state
+    assert json.loads(state_path.read_text())["schema_version"] == "2"
+
+
+def test_legacy_completed_run_state_is_refused_without_mutation(temp_dir) -> None:
+    state = create_run_state("legacy", [], 10)
+    finalize_run(state, 0)
+    path = temp_dir / "legacy-state.json"
+    save_run_state(path, state)
+    payload = json.loads(path.read_text())
+    payload.pop("schema_version", None)
+    path.write_text(json.dumps(payload))
+    before = path.read_bytes()
+    with pytest.raises(ValueError, match="fresh|rebuild"):
+        load_run_state(path)
+    assert path.read_bytes() == before
 
 
 def test_invalid_partition_transition_is_rejected() -> None:

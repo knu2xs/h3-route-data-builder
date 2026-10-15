@@ -1,5 +1,9 @@
 # Feature 002: Sparse OD Candidates
 
+With Feature 006, origin/destination IDs and directed keys are integers ordered numerically.
+Invalid identity types and resolution mismatches cannot enter scheduled work.
+This versioned representation cutover does not redefine the candidate policies below.
+
 AOI-only mode uses intersecting solvable cells as both origins and destinations. AOI-to-surrounding mode uses solvable origins inside the AOI and solvable destinations inside a conservatively expanded area.
 
 ## Requirements

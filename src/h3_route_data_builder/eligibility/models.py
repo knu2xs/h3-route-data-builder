@@ -5,6 +5,8 @@ from enum import StrEnum
 from typing import Any
 
 from h3_route_data_builder.utils import get_logger
+from h3.api import basic_int as h3
+from .cells import canonical_h3_ids
 
 logger = get_logger(__name__, level="DEBUG", add_stream_handler=False)
 
@@ -62,7 +64,7 @@ class EdgeEvidence:
 class CellEligibilityResult:
     """Auditable eligibility result for one canonical H3 cell."""
 
-    h3_id_hex: str
+    h3_id: int
     resolution: int
     eligibility_status: EligibilityStatus
     eligibility_reason: str
@@ -73,6 +75,14 @@ class CellEligibilityResult:
     build_fingerprint: str = ""
     cell_geometry: Any | None = None
     centroid_geometry: Any | None = None
+
+    def __post_init__(self) -> None:
+        """Validate integer identity and its declared resolution."""
+        canonical_h3_ids([self.h3_id])
+        if type(self.resolution) is not int or self.resolution != h3.get_resolution(self.h3_id):
+            message = "Cell resolution does not match H3 cell identity"
+            logger.error(message)
+            raise ValueError(message)
 
 
 @dataclass(frozen=True)
@@ -91,12 +101,20 @@ class EdgeIntersectionEvidence:
 class CellGeometryCandidate:
     """Geometry-stage result awaiting representative/location validation."""
 
-    h3_id_hex: str
+    h3_id: int
     resolution: int
     cell_geometry: Any
     centroid_geometry: Any
     intersecting_edges: tuple[EdgeIntersectionEvidence, ...]
     eligibility_reason: str
+
+    def __post_init__(self) -> None:
+        """Validate integer identity and its declared resolution."""
+        canonical_h3_ids([self.h3_id])
+        if type(self.resolution) is not int or self.resolution != h3.get_resolution(self.h3_id):
+            message = "Cell resolution does not match H3 cell identity"
+            logger.error(message)
+            raise ValueError(message)
 
     @property
     def has_eligible_intersection(self) -> bool:
@@ -142,18 +160,14 @@ def validated_solvable_results(
         if result.eligibility_status != EligibilityStatus.SOLVABLE:
             continue
         if result.intersecting_edge_count < 1:
-            logger.error(
-                "Solvable cell %s has no eligible intersecting edge", result.h3_id_hex
-            )
-            raise ValueError(
-                f"Solvable cell {result.h3_id_hex} has no eligible intersecting edge"
-            )
+            logger.error("Solvable cell %s has no eligible intersecting edge", result.h3_id)
+            raise ValueError(f"Solvable cell {result.h3_id} has no eligible intersecting edge")
         if result.representative is None:
-            logger.error("Solvable cell %s has no representative", result.h3_id_hex)
-            raise ValueError(f"Solvable cell {result.h3_id_hex} has no representative")
+            logger.error("Solvable cell %s has no representative", result.h3_id)
+            raise ValueError(f"Solvable cell {result.h3_id} has no representative")
         if result.representative.snap_distance_m > snap_tolerance_m:
-            logger.error("Solvable cell %s exceeds snap tolerance", result.h3_id_hex)
-            raise ValueError(f"Solvable cell {result.h3_id_hex} exceeds snap tolerance")
+            logger.error("Solvable cell %s exceeds snap tolerance", result.h3_id)
+            raise ValueError(f"Solvable cell {result.h3_id} exceeds snap tolerance")
         handoff.append(result)
     logger.info("Validated %s solvable cell(s) for downstream handoff", len(handoff))
     return handoff

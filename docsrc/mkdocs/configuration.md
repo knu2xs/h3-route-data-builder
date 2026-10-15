@@ -9,6 +9,14 @@ from code, making it easy to adjust behavior without modifying Python source fil
 
 ## File Layout
 
+!!! warning "Integer H3 working-state cutover"
+    Feature 006 requires fresh eligibility output and a separate format-2 OD ledger when
+    upgrading from hexadecimal-index working state. Existing ledgers are checked read-only
+    and rejected rather than migrated. Do not delete or overwrite them to force a resume.
+    New eligibility fingerprints and run-state/stage schema version 2 prevent legacy work reuse.
+    Historical publications remain unchanged; new dataset/cell/fact schemas are `2.0.0`.
+    No concurrency, cutoff, resolution, or batch configuration default changes are required.
+
 ```text
 config/
 ├── config.yml              # Main project settings (committed to version control)

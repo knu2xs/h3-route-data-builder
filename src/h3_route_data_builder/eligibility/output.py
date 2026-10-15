@@ -7,6 +7,7 @@ from typing import Any
 import pyarrow as pa
 
 from .models import CellEligibilityResult
+from .fingerprint import ELIGIBILITY_SCHEMA_VERSION
 from h3_route_data_builder.utils import get_logger
 
 logger = get_logger(__name__, level="DEBUG", add_stream_handler=False)
@@ -110,7 +111,7 @@ _GEO_METADATA = {
 
 def eligibility_results_to_table(
     results: Sequence[CellEligibilityResult],
-    geometry_wkb: Mapping[str, GeometryWkb],
+    geometry_wkb: Mapping[int, GeometryWkb],
 ) -> pa.Table:
     """Build a deterministic GeoParquet-compatible Arrow table from cell results.
 
@@ -129,32 +130,24 @@ def eligibility_results_to_table(
     """
     rows: list[dict[str, Any]] = []
     for result in results:
-        geometries = geometry_wkb.get(result.h3_id_hex)
+        geometries = geometry_wkb.get(result.h3_id)
         if geometries is None:
-            raise ValueError(
-                f"Missing serialized geometries for H3 cell {result.h3_id_hex}"
-            )
+            raise ValueError(f"Missing serialized geometries for H3 cell {result.h3_id}")
         cell_wkb, centroid_wkb, representative_wkb = geometries
         if not cell_wkb or not centroid_wkb:
-            raise ValueError(
-                f"Cell and centroid WKB are required for H3 cell {result.h3_id_hex}"
-            )
+            raise ValueError(f"Cell and centroid WKB are required for H3 cell {result.h3_id}")
 
         representative = result.representative
         rows.append(
             {
-                "h3_id_hex": result.h3_id_hex,
+                "h3_id": result.h3_id,
                 "resolution": result.resolution,
                 "cell_geometry": cell_wkb,
                 "centroid_geometry": centroid_wkb,
                 "representative_geometry": representative_wkb,
                 "intersecting_edge_count": result.intersecting_edge_count,
-                "network_source_id": (
-                    representative.source_id if representative else None
-                ),
-                "network_source_oid": (
-                    representative.source_oid if representative else None
-                ),
+                "network_source_id": (representative.source_id if representative else None),
+                "network_source_oid": (representative.source_oid if representative else None),
                 "pos_along": representative.pos_along if representative else None,
                 "side_of_edge": representative.side_of_edge if representative else None,
                 "representative_snap_distance_m": (
@@ -187,7 +180,7 @@ def eligibility_results_to_table(
 
     schema = pa.schema(
         [
-            pa.field("h3_id_hex", pa.string(), nullable=False),
+            pa.field("h3_id", pa.uint64(), nullable=False),
             pa.field("resolution", pa.int8(), nullable=False),
             pa.field("cell_geometry", pa.binary(), nullable=False),
             pa.field("centroid_geometry", pa.binary(), nullable=False),
@@ -204,11 +197,12 @@ def eligibility_results_to_table(
             pa.field("policy_evidence_json", pa.string(), nullable=False),
             pa.field("build_fingerprint", pa.string(), nullable=False),
         ],
-        metadata={b"geo": json.dumps(_GEO_METADATA, sort_keys=True).encode("utf-8")},
+        metadata={
+            b"geo": json.dumps(_GEO_METADATA, sort_keys=True).encode("utf-8"),
+            b"eligibility_schema_version": ELIGIBILITY_SCHEMA_VERSION.encode(),
+        },
     )
-    arrays = [
-        pa.array([row[field.name] for row in rows], type=field.type) for field in schema
-    ]
+    arrays = [pa.array([row[field.name] for row in rows], type=field.type) for field in schema]
     table = pa.Table.from_arrays(arrays, schema=schema)
     logger.info("Serialized %s eligibility rows for GeoParquet staging", table.num_rows)
     return table

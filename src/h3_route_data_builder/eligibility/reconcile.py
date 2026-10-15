@@ -41,16 +41,14 @@ def reconcile_cell_candidates(
     missing_keys = expected_keys - supplied_keys
     unexpected_keys = supplied_keys - expected_keys
     if missing_keys:
-        raise ValueError(
-            f"Missing expected partitions: {', '.join(sorted(missing_keys))}"
-        )
+        raise ValueError(f"Missing expected partitions: {', '.join(sorted(missing_keys))}")
     if unexpected_keys:
         raise ValueError(f"Unexpected partitions: {', '.join(sorted(unexpected_keys))}")
 
-    candidates_by_cell: dict[str, list[CellGeometryCandidate]] = {}
+    candidates_by_cell: dict[int, list[CellGeometryCandidate]] = {}
     for partition_key in sorted(expected_keys):
         for candidate in partition_candidates[partition_key]:
-            canonical_id = canonical_h3_ids([candidate.h3_id_hex])[0]
+            canonical_id = canonical_h3_ids([candidate.h3_id])[0]
             candidates_by_cell.setdefault(canonical_id, []).append(candidate)
 
     reconciled: list[CellGeometryCandidate] = []
@@ -70,7 +68,7 @@ def reconcile_cell_candidates(
         first_candidate = cell_candidates[0]
         reconciled.append(
             CellGeometryCandidate(
-                h3_id_hex=cell_id,
+                h3_id=cell_id,
                 resolution=first_candidate.resolution,
                 cell_geometry=first_candidate.cell_geometry,
                 centroid_geometry=first_candidate.centroid_geometry,
@@ -113,9 +111,7 @@ def finalize_eligibility_results(
     """
     if run_state.status != RunStatus.PROCESSING:
         raise ValueError(f"Cannot finalize a {run_state.status.value} run")
-    if any(
-        status.value != "reconciled" for status in run_state.partition_status.values()
-    ):
+    if any(status.value != "reconciled" for status in run_state.partition_status.values()):
         run_state.status = RunStatus.FAILED_INCOMPLETE
         raise ValueError("Cannot complete a run with unreconciled partitions")
 
@@ -124,9 +120,7 @@ def finalize_eligibility_results(
     except ValueError:
         run_state.status = RunStatus.FAILED_INCOMPLETE
         raise
-    normalized_ids = [
-        canonical_h3_ids([result.h3_id_hex])[0] for result in solvable_results
-    ]
+    normalized_ids = [canonical_h3_ids([result.h3_id])[0] for result in solvable_results]
     if len(normalized_ids) != len(set(normalized_ids)):
         run_state.status = RunStatus.FAILED_INCOMPLETE
         raise ValueError("Duplicate H3 cells remain after eligibility reconciliation")

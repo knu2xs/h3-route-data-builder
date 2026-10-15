@@ -4,10 +4,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from h3_route_data_builder.eligibility.cells import canonical_h3_ids
 
-DATASET_SCHEMA_VERSION = "1.0.0"
-CELL_SCHEMA_VERSION = "1.0.0"
-FACT_SCHEMA_VERSION = "1.0.0"
+DATASET_SCHEMA_VERSION = "2.0.0"
+CELL_SCHEMA_VERSION = "2.0.0"
+FACT_SCHEMA_VERSION = "2.0.0"
 GEOPARQUET_VERSION = "1.1.0"
 
 
@@ -21,7 +22,12 @@ class PublishedPart:
     checksum: str
     schema_version: str
     extent: tuple[float, float, float, float] | None = None
-    origin_ids: tuple[str, ...] = ()
+    origin_ids: tuple[int, ...] = ()
+
+    def __post_init__(self) -> None:
+        """Require canonical numeric origin metadata, never textual path-derived IDs."""
+        if tuple(canonical_h3_ids(self.origin_ids)) != self.origin_ids:
+            raise ValueError("Published part origin_ids must be sorted and unique integer H3 IDs")
 
     def to_dict(self, root: Path | None = None) -> dict[str, Any]:
         """Serialize a part reference, relative to root when supplied."""
@@ -82,7 +88,7 @@ class DatasetManifest:
     schema_versions: dict[str, str] = field(default_factory=dict)
     geoparquet_version: str = GEOPARQUET_VERSION
     crs: str = "EPSG:4326"
-    partition_scheme: str = "origin_h3_id_hex"
+    partition_scheme: str = "origin_h3_id"
     spatial_ordering_policy: str = "canonical_h3_id"
 
     def to_dict(self, root: Path | None = None) -> dict[str, Any]:

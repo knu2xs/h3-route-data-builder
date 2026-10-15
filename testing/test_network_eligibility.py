@@ -1,6 +1,8 @@
 """Tests for fail-closed Network Analyst edge eligibility."""
 
 import pytest
+import json
+from pathlib import Path
 from typing import Any
 
 from h3_route_data_builder.network.eligibility import (
@@ -26,6 +28,25 @@ TEST_PROJECTED_CRS = (
     'PARAMETER["Scale_Factor",1],PARAMETER["Latitude_Of_Origin",0],'
     'UNIT["Meter",1],AXIS["X",EAST],AXIS["Y",NORTH]]'
 )
+
+
+def test_legacy_completed_manifest_is_not_adopted(tmp_path: Path) -> None:
+    from h3_route_data_builder.network.workflow import _read_manifest
+
+    path = tmp_path / "legacy-manifest.json"
+    path.write_text(
+        json.dumps(
+            {
+                "run_status": "complete",
+                "input_fingerprint": {"identity": "same-input"},
+                "cell_result_count": 10,
+            }
+        )
+    )
+    before = path.read_bytes()
+    with pytest.raises(ValueError, match="fresh|rebuild"):
+        _read_manifest(path, "same-input")
+    assert path.read_bytes() == before
 
 
 def make_projected_line(
@@ -165,25 +186,17 @@ def test_avoid_usage_does_not_make_edge_non_traversable(avoid_usage: int) -> Non
     )
 
 
-def test_required_edge_fields_include_direction_and_prohibited_restrictions_only() -> (
-    None
-):
+def test_required_edge_fields_include_direction_and_prohibited_restrictions_only() -> None:
     attributes = make_network_attributes()
     attributes["Avoid Private Roads"] = NetworkAttributeDefinition(
         name="Avoid Private Roads",
         usage_type="Restriction",
-        evaluators=(
-            make_evaluator(
-                "Streets", "AlongDigitizedDirection", "!PUBLIC_ROAD! == 'N'"
-            ),
-        ),
+        evaluators=(make_evaluator("Streets", "AlongDigitizedDirection", "!PUBLIC_ROAD! == 'N'"),),
     )
     attributes["Turn Only Prohibition"] = NetworkAttributeDefinition(
         name="Turn Only Prohibition",
         usage_type="Restriction",
-        evaluators=(
-            make_evaluator("RestrictedTurns", None, "!TURN_RESTRICTED! == 'Y'"),
-        ),
+        evaluators=(make_evaluator("RestrictedTurns", None, "!TURN_RESTRICTED! == 'Y'"),),
     )
     travel_mode = {
         "restrictionAttributeNames": ["Driving an Automobile", "Avoid Private Roads"],
@@ -286,12 +299,10 @@ def test_representative_candidates_tie_break_by_source_id_and_oid(arcpy_module) 
     ]
 
     candidates = rank_representative_candidates(
-        "8928308280fffff", centroid, intersections, snap_tolerance_m=0.001
+        617700169958293503, centroid, intersections, snap_tolerance_m=0.001
     )
 
-    assert [
-        (candidate.source_id, candidate.source_oid) for candidate in candidates
-    ] == [
+    assert [(candidate.source_id, candidate.source_oid) for candidate in candidates] == [
         (1, 3),
         (1, 9),
         (2, 1),
@@ -315,7 +326,7 @@ def test_representative_candidate_stays_on_in_aoi_intersection(arcpy_module) -> 
     intersection = EdgeIntersectionEvidence(1, 1, network_line, in_aoi_line)
 
     candidates = rank_representative_candidates(
-        "8928308280fffff", centroid, [intersection], snap_tolerance_m=0.001
+        617700169958293503, centroid, [intersection], snap_tolerance_m=0.001
     )
 
     assert len(candidates) == 1
@@ -336,7 +347,7 @@ def test_representative_candidates_outside_snap_tolerance_are_excluded(
     intersection = EdgeIntersectionEvidence(1, 1, network_edge, stale_intersection)
 
     candidates = rank_representative_candidates(
-        "8928308280fffff", centroid, [intersection], snap_tolerance_m=0.01
+        617700169958293503, centroid, [intersection], snap_tolerance_m=0.01
     )
 
     assert candidates == []
@@ -351,7 +362,7 @@ def make_representative_candidate(
     spatial_reference = arcpy_module.SpatialReference(4326)
     point = arcpy_module.PointGeometry(arcpy_module.Point(-74, 40), spatial_reference)
     return RepresentativeCandidate(
-        h3_id_hex="8928308280fffff",
+        h3_id=617700169958293503,
         point_geometry=point,
         source_id=1,
         source_oid=source_oid,
@@ -424,9 +435,7 @@ def test_location_with_missing_network_fields_returns_none(
     arcpy_module,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    candidate = make_representative_candidate(
-        arcpy_module, source_oid=10, distance_m=1.0
-    )
+    candidate = make_representative_candidate(arcpy_module, source_oid=10, distance_m=1.0)
 
     def fake_calculate_locations(
         in_point_features: str,

@@ -17,7 +17,7 @@ def make_fingerprint(**overrides: object) -> str:
             "intersection": "inclusive",
             "tie_break": ["source", "oid"],
         },
-        "schema_version": "1",
+        "schema_version": "2",
         "software_versions": {
             "python": "3.13",
             "arcgis_pro": "3.7",
@@ -58,3 +58,7 @@ def test_fingerprint_changes_when_output_policy_changes() -> None:
 def test_fingerprint_requires_software_versions() -> None:
     with pytest.raises(ValueError, match="Missing software versions"):
         make_fingerprint(software_versions={"python": "3.13"})
+
+
+def test_integer_schema_fingerprint_does_not_adopt_legacy_identity() -> None:
+    assert make_fingerprint() != make_fingerprint(schema_version="1")

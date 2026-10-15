@@ -3,7 +3,7 @@
 import pytest
 
 arcpy = pytest.importorskip("arcpy")
-h3 = pytest.importorskip("h3")
+h3 = pytest.importorskip("h3.api.basic_int")
 
 from h3_route_data_builder.od.candidates import build_candidate_plan
 from h3_route_data_builder.eligibility.models import (
@@ -44,7 +44,7 @@ def cell_result(
         arcpy.SpatialReference(4326),
     )
     return CellEligibilityResult(
-        h3_id_hex=cell_id,
+        h3_id=cell_id,
         resolution=9,
         eligibility_status=(
             EligibilityStatus.SOLVABLE if solvable else EligibilityStatus.INELIGIBLE
@@ -68,9 +68,7 @@ def cell_result(
     )
 
 
-def test_surrounding_scope_includes_boundary_touching_cells_and_only_solvable_endpoints() -> (
-    None
-):
+def test_surrounding_scope_includes_boundary_touching_cells_and_only_solvable_endpoints() -> None:
     inside = cell_result(0.0, 0.0)
     surrounding = cell_result(0.0, 0.002)
     aoi = polygon(
@@ -89,18 +87,16 @@ def test_surrounding_scope_includes_boundary_touching_cells_and_only_solvable_en
         resolution=9,
     )
 
-    assert set(scope.origin_ids) == {inside.h3_id_hex, surrounding.h3_id_hex}
-    assert inside.h3_id_hex in scope.destination_ids
-    assert surrounding.h3_id_hex in scope.destination_ids
-    assert ineligible.h3_id_hex not in scope.origin_ids
-    assert ineligible.h3_id_hex not in scope.destination_ids
+    assert set(scope.origin_ids) == {inside.h3_id, surrounding.h3_id}
+    assert inside.h3_id in scope.destination_ids
+    assert surrounding.h3_id in scope.destination_ids
+    assert ineligible.h3_id not in scope.origin_ids
+    assert ineligible.h3_id not in scope.destination_ids
     assert scope.maximum_origin_offset_m > 0.0
     assert scope.expanded_aoi.disjoint(aoi) is False
 
 
-def test_nearest_aoi_offset_is_not_centroid_distance_and_expands_by_offset_plus_reach() -> (
-    None
-):
+def test_nearest_aoi_offset_is_not_centroid_distance_and_expands_by_offset_plus_reach() -> None:
     aoi = polygon(-0.001, -0.001, 0.001, 0.001)
     origin = cell_result(0.0, 0.0015)
 
@@ -119,9 +115,7 @@ def test_nearest_aoi_offset_is_not_centroid_distance_and_expands_by_offset_plus_
 def test_invalid_reach_fails_and_declared_source_crs_is_projected_to_wgs84() -> None:
     aoi = polygon(-0.001, -0.001, 0.001, 0.001)
     with pytest.raises(ValueError, match="reach_distance_m"):
-        build_aoi_candidate_scope(
-            aoi, [], CandidateMode.AOI_TO_SURROUNDING, -1.0, resolution=9
-        )
+        build_aoi_candidate_scope(aoi, [], CandidateMode.AOI_TO_SURROUNDING, -1.0, resolution=9)
 
     web_mercator = arcpy.SpatialReference(3857)
     projected_aoi = polygon(-0.001, -0.001, 0.001, 0.001).projectAs(web_mercator)
@@ -145,7 +139,7 @@ def test_destination_only_cells_do_not_get_self_pairs() -> None:
     )
     portable_cells = [
         SolvableCell(
-            h3_id_hex=result.h3_id_hex,
+            h3_id=result.h3_id,
             resolution=result.resolution,
             eligibility_status=result.eligibility_status,
             representative=(result.representative.x, result.representative.y),
@@ -155,12 +149,12 @@ def test_destination_only_cells_do_not_get_self_pairs() -> None:
     ]
     plan = build_candidate_plan(portable_cells, scope, 2000.0, "m")
 
-    assert outside.h3_id_hex in scope.destination_ids
-    assert outside.h3_id_hex not in scope.origin_ids
+    assert outside.h3_id in scope.destination_ids
+    assert outside.h3_id not in scope.origin_ids
     assert all(
         pair.origin_h3_id != pair.destination_h3_id
         for pair in plan.pairs
-        if pair.destination_h3_id == outside.h3_id_hex
+        if pair.destination_h3_id == outside.h3_id
     )
 
 
@@ -177,5 +171,5 @@ def test_aoi_only_geometry_uses_identical_origin_and_destination_sets() -> None:
         resolution=9,
     )
 
-    assert scope.origin_ids == (inside.h3_id_hex,)
+    assert scope.origin_ids == (inside.h3_id,)
     assert scope.destination_ids == scope.origin_ids

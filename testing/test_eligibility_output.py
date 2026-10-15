@@ -16,12 +16,10 @@ from h3_route_data_builder.eligibility.output import eligibility_results_to_tabl
 def make_result(status: EligibilityStatus) -> CellEligibilityResult:
     """Create a cell result for output-schema assertions."""
     representative = (
-        NetworkLocation(1, 2, 3, 4, 0.5, 1, 0.0)
-        if status == EligibilityStatus.SOLVABLE
-        else None
+        NetworkLocation(1, 2, 3, 4, 0.5, 1, 0.0) if status == EligibilityStatus.SOLVABLE else None
     )
     return CellEligibilityResult(
-        h3_id_hex="8928308280fffff",
+        h3_id=617700169958293503,
         resolution=9,
         eligibility_status=status,
         eligibility_reason="validated" if representative else "no eligible edge",
@@ -35,11 +33,14 @@ def test_output_table_has_required_geoparquet_and_location_fields() -> None:
     result = make_result(EligibilityStatus.SOLVABLE)
     table = eligibility_results_to_table(
         [result],
-        {result.h3_id_hex: (b"cell-wkb", b"centroid-wkb", b"representative-wkb")},
+        {result.h3_id: (b"cell-wkb", b"centroid-wkb", b"representative-wkb")},
     )
     geo_metadata = json.loads(table.schema.metadata[b"geo"])
 
-    assert table.column("h3_id_hex").to_pylist() == [result.h3_id_hex]
+    assert table.column("h3_id").to_pylist() == [result.h3_id]
+    assert table.schema.field("h3_id").type == pa.uint64()
+    assert not table.schema.field("h3_id").nullable
+    assert table.schema.metadata[b"eligibility_schema_version"] == b"2"
     assert table.column("network_source_id").to_pylist() == [3]
     assert table.column("network_source_oid").to_pylist() == [4]
     assert table.column("pos_along").to_pylist() == [0.5]
@@ -59,7 +60,7 @@ def test_output_table_keeps_representative_fields_null_for_ineligible_cell() -> 
     result = make_result(EligibilityStatus.INELIGIBLE)
     table = eligibility_results_to_table(
         [result],
-        {result.h3_id_hex: (b"cell-wkb", b"centroid-wkb", None)},
+        {result.h3_id: (b"cell-wkb", b"centroid-wkb", None)},
     )
 
     assert table.column("eligibility_status").to_pylist() == ["ineligible"]
@@ -73,5 +74,5 @@ def test_output_table_requires_cell_and_centroid_geometry() -> None:
     with pytest.raises(ValueError, match="Cell and centroid WKB are required"):
         eligibility_results_to_table(
             [result],
-            {result.h3_id_hex: (b"", b"centroid-wkb", None)},
+            {result.h3_id: (b"", b"centroid-wkb", None)},
         )

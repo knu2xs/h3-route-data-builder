@@ -3,7 +3,7 @@
 from typing import Any
 
 import pytest
-import h3
+from h3.api import basic_int as h3
 
 from h3_route_data_builder.network.geometry import (
     _best_available_datum_transformation,
@@ -115,9 +115,7 @@ def test_project_geometry_uses_explicit_target_spatial_reference(
 ) -> None:
     source_reference = make_spatial_reference(arcpy_module)
     target_reference = make_spatial_reference(arcpy_module)
-    geometry = make_polygon(
-        arcpy_module, [(0, 0), (10, 0), (10, 10), (0, 10)], source_reference
-    )
+    geometry = make_polygon(arcpy_module, [(0, 0), (10, 0), (10, 10), (0, 10)], source_reference)
 
     projected = project_geometry(geometry, target_reference)
 
@@ -241,9 +239,7 @@ def test_clip_edge_to_aoi_returns_only_in_aoi_linework(
     square_aoi: Any,
     projected_spatial_reference: Any,
 ) -> None:
-    edge = make_polyline(
-        arcpy_module, [[(-5, 5), (15, 5)]], projected_spatial_reference
-    )
+    edge = make_polyline(arcpy_module, [[(-5, 5), (15, 5)]], projected_spatial_reference)
 
     clipped = clip_edge_to_aoi(edge, square_aoi)
 
@@ -283,9 +279,7 @@ def test_geometry_candidates_use_only_eligible_edges_inside_aoi(
         geometry_working=make_polyline(
             arcpy_module, [[(-1, 5), (11, 5)]], projected_spatial_reference
         ),
-        decision=EdgeEligibilityDecision(
-            "eligible", ("AlongDigitizedDirection",), "allowed"
-        ),
+        decision=EdgeEligibilityDecision("eligible", ("AlongDigitizedDirection",), "allowed"),
     )
     restricted_edge = NetworkEdgeRecord(
         source_id=1,
@@ -303,18 +297,16 @@ def test_geometry_candidates_use_only_eligible_edges_inside_aoi(
     )
 
     candidates = build_geometry_candidates(
-        {"8928308280fffff": square_aoi, "8928308280bffff": outside_cell},
+        {617700169958293503: square_aoi, 617700169958031359: outside_cell},
         [restricted_edge, eligible_edge],
         square_aoi,
         resolution=9,
     )
 
-    by_id = {candidate.h3_id_hex: candidate for candidate in candidates}
-    assert by_id["8928308280fffff"].has_eligible_intersection
-    assert [
-        edge.source_oid for edge in by_id["8928308280fffff"].intersecting_edges
-    ] == [100]
-    assert not by_id["8928308280bffff"].has_eligible_intersection
+    by_id = {candidate.h3_id: candidate for candidate in candidates}
+    assert by_id[617700169958293503].has_eligible_intersection
+    assert [edge.source_oid for edge in by_id[617700169958293503].intersecting_edges] == [100]
+    assert not by_id[617700169958031359].has_eligible_intersection
 
 
 def test_geometry_candidates_classify_only_unique_intersecting_edges(
@@ -323,12 +315,12 @@ def test_geometry_candidates_classify_only_unique_intersecting_edges(
     projected_spatial_reference: Any,
 ) -> None:
     cells = {
-        "8928308280fffff": make_polygon(
+        617700169958293503: make_polygon(
             arcpy_module,
             [(0, 0), (6, 0), (6, 10), (0, 10)],
             projected_spatial_reference,
         ),
-        "8928308280bffff": make_polygon(
+        617700169958031359: make_polygon(
             arcpy_module,
             [(4, 0), (10, 0), (10, 10), (4, 10)],
             projected_spatial_reference,
@@ -367,13 +359,9 @@ def test_geometry_candidates_classify_only_unique_intersecting_edges(
         ),
     ]
     decisions = {
-        100: EdgeEligibilityDecision(
-            "eligible", ("AlongDigitizedDirection",), "allowed"
-        ),
+        100: EdgeEligibilityDecision("eligible", ("AlongDigitizedDirection",), "allowed"),
         101: EdgeEligibilityDecision("restricted", (), "restricted"),
-        102: EdgeEligibilityDecision(
-            "eligible", ("AlongDigitizedDirection",), "allowed"
-        ),
+        102: EdgeEligibilityDecision("eligible", ("AlongDigitizedDirection",), "allowed"),
     }
     classified_oids: list[int] = []
 
@@ -413,18 +401,14 @@ def test_geometry_candidate_evidence_is_clipped_to_the_cell(
         geometry_working=make_polyline(
             arcpy_module, [[(-1, 5), (11, 5)]], projected_spatial_reference
         ),
-        decision=EdgeEligibilityDecision(
-            "eligible", ("AlongDigitizedDirection",), "allowed"
-        ),
+        decision=EdgeEligibilityDecision("eligible", ("AlongDigitizedDirection",), "allowed"),
     )
 
     candidates = build_geometry_candidates(
-        {"8928308280fffff": cell}, [edge], square_aoi, resolution=9
+        {617700169958293503: cell}, [edge], square_aoi, resolution=9
     )
 
-    intersection_geometry = (
-        candidates[0].intersecting_edges[0].in_aoi_intersection_geometry
-    )
+    intersection_geometry = candidates[0].intersecting_edges[0].in_aoi_intersection_geometry
     assert intersection_geometry.extent.XMin == pytest.approx(4)
     assert intersection_geometry.extent.XMax == pytest.approx(6)
 
@@ -439,7 +423,7 @@ def test_cell_result_geometries_are_written_as_wgs84_wkb(
         wgs84,
     )
     result = CellEligibilityResult(
-        h3_id_hex="8928308280fffff",
+        h3_id=617700169958293503,
         resolution=9,
         eligibility_status=EligibilityStatus.SOLVABLE,
         eligibility_reason="validated",
@@ -456,19 +440,14 @@ def test_cell_result_geometries_are_written_as_wgs84_wkb(
 
     geometries = cell_result_geometries_wkb([result])
 
-    cell_wkb, centroid_wkb, representative_wkb = geometries[result.h3_id_hex]
+    cell_wkb, centroid_wkb, representative_wkb = geometries[result.h3_id]
     assert output_spatial_reference.factoryCode == 4326
     cell_output = arcpy_module.FromWKB(cell_wkb, output_spatial_reference)
     assert cell_output.type.casefold() == "polygon"
     assert -74.1 < cell_output.extent.XMax < -73.9
     assert 40.6 < cell_output.extent.YMax < 40.8
+    assert arcpy_module.FromWKB(centroid_wkb, output_spatial_reference).type.casefold() == "point"
     assert (
-        arcpy_module.FromWKB(centroid_wkb, output_spatial_reference).type.casefold()
-        == "point"
-    )
-    assert (
-        arcpy_module.FromWKB(
-            representative_wkb, output_spatial_reference
-        ).type.casefold()
+        arcpy_module.FromWKB(representative_wkb, output_spatial_reference).type.casefold()
         == "point"
     )

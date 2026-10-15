@@ -6,7 +6,7 @@ import uuid
 from collections.abc import Sequence
 
 import arcpy
-from h3 import get_resolution
+from h3.api.basic_int import get_resolution
 
 from h3_route_data_builder.eligibility.cells import (
     canonical_h3_ids,
@@ -182,7 +182,7 @@ def project_geometry(
 def candidate_h3_cells_for_aoi(
     aoi_geometry: arcpy.Geometry,
     resolution: int,
-) -> list[str]:
+) -> list[int]:
     """Project a valid AOI to H3's geographic coordinates and return candidate cell IDs.
 
     This result is a conservative cover only. Eligible cells still require an exact ArcPy
@@ -193,7 +193,7 @@ def candidate_h3_cells_for_aoi(
         resolution: Configured H3 resolution from 0 through 15.
 
     Returns:
-        Canonical lowercase hexadecimal candidate H3 IDs in deterministic order.
+        Canonical integer candidate H3 IDs in deterministic numeric order.
 
     Raises:
         ValueError: If the AOI, resolution, or datum transformation is invalid.
@@ -221,14 +221,12 @@ def candidate_h3_cells_for_aoi(
     if geojson_geometry is None:
         raise ValueError("ArcPy AOI geometry does not expose a GeoJSON interface")
     candidates = h3_candidate_ids(geojson_geometry, resolution)
-    logger.info(
-        "Generated %s H3 candidates at resolution %s", len(candidates), resolution
-    )
+    logger.info("Generated %s H3 candidates at resolution %s", len(candidates), resolution)
     return candidates
 
 
 def h3_cell_polygon(
-    cell_id: str,
+    cell_id: int,
 ) -> arcpy.Geometry:
     """Construct a canonical H3 cell polygon in WGS 84 with ArcPy.
 
@@ -256,7 +254,9 @@ def h3_cell_polygon(
     try:
         polygon = arcpy.Polygon(points, h3_spatial_reference)
     except arcpy.ExecuteError as exc:
-        message = f"Could not construct ArcPy polygon for H3 cell {cell_id!r}: {arcpy.GetMessages(2)}"
+        message = (
+            f"Could not construct ArcPy polygon for H3 cell {cell_id!r}: {arcpy.GetMessages(2)}"
+        )
         logger.error(message)
         raise RuntimeError(message) from exc
     return polygon
@@ -264,7 +264,7 @@ def h3_cell_polygon(
 
 def cell_result_geometries_wkb(
     results: list[CellEligibilityResult],
-) -> dict[str, tuple[bytes, bytes, bytes | None]]:
+) -> dict[int, tuple[bytes, bytes, bytes | None]]:
     """Encode validated WGS 84 cell output geometries as WKB.
 
     Args:
@@ -277,12 +277,10 @@ def cell_result_geometries_wkb(
         ValueError: If required geometries or spatial references are missing or unknown.
     """
     output_spatial_reference = arcpy.SpatialReference(WGS84_CRS_NAME)
-    serialized: dict[str, tuple[bytes, bytes, bytes | None]] = {}
+    serialized: dict[int, tuple[bytes, bytes, bytes | None]] = {}
     for result in results:
         if result.cell_geometry is None or result.centroid_geometry is None:
-            raise ValueError(
-                f"Cell and centroid geometry are required for H3 cell {result.h3_id_hex}"
-            )
+            raise ValueError(f"Cell and centroid geometry are required for H3 cell {result.h3_id}")
         centroid_geometry = result.centroid_geometry
         if not hasattr(centroid_geometry, "spatialReference"):
             centroid_geometry = arcpy.PointGeometry(
@@ -300,7 +298,7 @@ def cell_result_geometries_wkb(
                 output_spatial_reference,
             )
             representative_wkb = bytes(point_geometry.WKB)
-        serialized[result.h3_id_hex] = (
+        serialized[result.h3_id] = (
             cell_wkb,
             centroid_wkb,
             representative_wkb,
@@ -437,11 +435,7 @@ def build_aoi_candidate_scope(
         or reach_distance_m < 0
     ):
         raise ValueError("reach_distance_m must be finite and non-negative")
-    if (
-        isinstance(resolution, bool)
-        or not isinstance(resolution, int)
-        or not 0 <= resolution <= 15
-    ):
+    if isinstance(resolution, bool) or not isinstance(resolution, int) or not 0 <= resolution <= 15:
         raise ValueError("resolution must be an H3 resolution between 0 and 15")
 
     validate_aoi_geometry(aoi_geometry)
@@ -452,7 +446,7 @@ def build_aoi_candidate_scope(
         else project_geometry(aoi_geometry, wgs84)
     )
 
-    usable_cells: dict[str, CellEligibilityResult] = {}
+    usable_cells: dict[int, CellEligibilityResult] = {}
     for result in cell_results:
         if result.eligibility_status != EligibilityStatus.SOLVABLE:
             continue
@@ -462,8 +456,8 @@ def build_aoi_candidate_scope(
             or result.resolution < 0
             or result.resolution > 15
         ):
-            raise ValueError(f"Invalid H3 resolution for cell {result.h3_id_hex!r}")
-        cell_id = canonical_h3_ids((result.h3_id_hex,))[0]
+            raise ValueError(f"Invalid H3 resolution for cell {result.h3_id!r}")
+        cell_id = canonical_h3_ids((result.h3_id,))[0]
         if get_resolution(cell_id) != result.resolution:
             raise ValueError(f"H3 resolution mismatch for cell {cell_id!r}")
         if result.resolution != resolution:
@@ -492,7 +486,6 @@ def build_aoi_candidate_scope(
                 for cell_id, result in usable_cells.items()
                 if not result.cell_geometry.disjoint(aoi_wgs84)
             ),
-            key=lambda value: int(value, 16),
         )
     )
     if selected_mode == CandidateMode.AOI_ONLY:
@@ -527,7 +520,6 @@ def build_aoi_candidate_scope(
                 for cell_id, result in usable_cells.items()
                 if not result.cell_geometry.disjoint(expanded_aoi)
             ),
-            key=lambda value: int(value, 16),
         )
     )
     logger.info(
@@ -553,12 +545,12 @@ def build_aoi_candidate_scope(
 
 def _nearest_aoi_offsets_m(
     aoi_geometry: arcpy.Geometry,
-    origin_ids: tuple[str, ...],
-    cells: dict[str, CellEligibilityResult],
-) -> dict[str, float]:
+    origin_ids: tuple[int, ...],
+    cells: dict[int, CellEligibilityResult],
+) -> dict[int, float]:
     """Measure exterior representatives to the nearest AOI point geodesically."""
-    offsets: dict[str, float] = {}
-    outside_ids: list[str] = []
+    offsets: dict[int, float] = {}
+    outside_ids: list[int] = []
     for cell_id in origin_ids:
         representative = cells[cell_id].representative
         point_geometry = arcpy.PointGeometry(
@@ -584,9 +576,7 @@ def _nearest_aoi_offsets_m(
             spatial_reference=aoi_geometry.spatialReference,
         )
         arcpy.management.AddField(point_features, "cell_index", "LONG")
-        with arcpy.da.InsertCursor(
-            point_features, ["SHAPE@XY", "cell_index"]
-        ) as cursor:
+        with arcpy.da.InsertCursor(point_features, ["SHAPE@XY", "cell_index"]) as cursor:
             for index, cell_id in enumerate(outside_ids):
                 representative = cells[cell_id].representative
                 cursor.insertRow(((representative.x, representative.y), index))
@@ -618,10 +608,7 @@ def _nearest_aoi_offsets_m(
                 "ArcPy did not return nearest-AOI distances for all origin representatives"
             )
     except arcpy.ExecuteError as exc:
-        message = (
-            "Could not measure nearest AOI distances geodesically: "
-            f"{arcpy.GetMessages(2)}"
-        )
+        message = "Could not measure nearest AOI distances geodesically: " f"{arcpy.GetMessages(2)}"
         logger.error(message)
         raise RuntimeError(message) from exc
     finally:

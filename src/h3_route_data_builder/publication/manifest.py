@@ -35,12 +35,8 @@ def build_partition_manifest(
         if extents
         else None
     )
-    schema_version = (
-        CELL_SCHEMA_VERSION if table_name == "solvable_cells" else FACT_SCHEMA_VERSION
-    )
-    partition_keys = (
-        ("h3_id_hex",) if table_name == "solvable_cells" else ("origin_h3_id_hex",)
-    )
+    schema_version = CELL_SCHEMA_VERSION if table_name == "solvable_cells" else FACT_SCHEMA_VERSION
+    partition_keys = ("h3_id",) if table_name == "solvable_cells" else ("origin_h3_id",)
     return PartitionManifest(
         table_name=table_name,
         partition_keys=partition_keys,
@@ -89,9 +85,7 @@ def build_dataset_manifest(
         raise ValueError("Outcome counts must be non-negative")
     names = [partition.table_name for partition in partition_manifests]
     if sorted(names) != ["od_facts", "solvable_cells"]:
-        raise ValueError(
-            "Manifest must reference both logical publication tables exactly once"
-        )
+        raise ValueError("Manifest must reference both logical publication tables exactly once")
     return DatasetManifest(
         version_id=version_id,
         status="complete",
@@ -119,6 +113,13 @@ def build_dataset_manifest(
 def validate_manifest(document: dict[str, Any], root: Path) -> list[str]:
     """Validate manifest structure, references, and reconciled part totals."""
     errors: list[str] = []
+    versions = {
+        "dataset": DATASET_SCHEMA_VERSION,
+        "solvable_cells": CELL_SCHEMA_VERSION,
+        "od_facts": FACT_SCHEMA_VERSION,
+    }
+    if document.get("schema_versions") != versions:
+        errors.append("Dataset manifest has incompatible integer schema versions")
     if document.get("status") != "complete":
         errors.append("Dataset manifest is not complete")
     if document.get("geoparquet_version") != GEOPARQUET_VERSION:
@@ -130,12 +131,17 @@ def validate_manifest(document: dict[str, Any], root: Path) -> list[str]:
     table_names: set[str] = set()
     for partition in document.get("partition_manifests", []):
         table_name = partition.get("table_name")
+        expected_version = versions.get(table_name)
+        if expected_version is None or partition.get("schema_version") != expected_version:
+            errors.append(f"Incompatible partition schema version for {table_name}")
         if table_name in table_names:
             errors.append(f"Duplicate partition manifest for {table_name}")
         table_names.add(table_name)
         parts = partition.get("parts", [])
         count = 0
         for part in parts:
+            if part.get("schema_version") != expected_version:
+                errors.append(f"Incompatible part schema version for {table_name}")
             location = part.get("location")
             if not location:
                 errors.append(f"{table_name} part has no location")
@@ -145,9 +151,7 @@ def validate_manifest(document: dict[str, Any], root: Path) -> list[str]:
             if not path.is_file():
                 errors.append(f"Manifest part is missing: {location}")
             elif not path.resolve().is_relative_to(root.resolve()):
-                errors.append(
-                    f"Manifest part escapes the version directory: {location}"
-                )
+                errors.append(f"Manifest part escapes the version directory: {location}")
         if count != partition.get("row_count"):
             errors.append(f"{table_name} manifest row totals do not reconcile")
     if table_names != {"solvable_cells", "od_facts"}:
@@ -171,7 +175,5 @@ def validate_manifest(document: dict[str, Any], root: Path) -> list[str]:
     if outcome_counts.get("qualifying", 0) + outcome_counts.get("self_pair", 0) != (
         document.get("published_key_count")
     ):
-        errors.append(
-            "Qualifying and self-pair outcomes do not equal published_key_count"
-        )
+        errors.append("Qualifying and self-pair outcomes do not equal published_key_count")
     return errors

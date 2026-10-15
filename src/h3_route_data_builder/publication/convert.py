@@ -3,9 +3,10 @@
 import math
 from collections.abc import Mapping, Sequence
 
-import h3
+from h3.api import basic_int as h3
 import pyarrow as pa
 
+from h3_route_data_builder.eligibility.cells import canonical_h3_ids
 from h3_route_data_builder.eligibility.models import (
     CellEligibilityResult,
     EligibilityStatus,
@@ -24,12 +25,12 @@ from h3_route_data_builder.utils import get_logger
 logger = get_logger(__name__, level="DEBUG", add_stream_handler=False)
 
 GeometryWkb = tuple[bytes, bytes, bytes | None]
-LogicalKey = tuple[str, str]
+LogicalKey = tuple[int, int]
 
 
 def solvable_cells_to_table(
     results: Sequence[CellEligibilityResult],
-    geometry_wkb: Mapping[str, GeometryWkb],
+    geometry_wkb: Mapping[int, GeometryWkb],
 ) -> pa.Table:
     """Convert Feature 001 solvable cells into the publication dimension.
 
@@ -37,9 +38,9 @@ def solvable_cells_to_table(
     operations and does not import ArcPy.
     """
     rows: list[dict[str, object]] = []
-    seen: set[str] = set()
-    for result in sorted(results, key=lambda item: item.h3_id_hex):
-        cell_id = _canonical_h3(result.h3_id_hex, result.resolution)
+    seen: set[int] = set()
+    for result in sorted(results, key=lambda item: item.h3_id):
+        cell_id = _canonical_h3(result.h3_id, result.resolution)
         if cell_id in seen:
             raise ValueError(f"Duplicate solvable cell identifier: {cell_id}")
         seen.add(cell_id)
@@ -48,11 +49,9 @@ def solvable_cells_to_table(
         representative = result.representative
         if representative is None or result.intersecting_edge_count < 1:
             raise ValueError(f"Solvable cell {cell_id} lacks representative evidence")
-        geometry = geometry_wkb.get(cell_id) or geometry_wkb.get(result.h3_id_hex)
+        geometry = geometry_wkb.get(cell_id)
         if geometry is None or len(geometry) != 3:
-            raise ValueError(
-                f"Missing cell, centroid, or representative WKB for {cell_id}"
-            )
+            raise ValueError(f"Missing cell, centroid, or representative WKB for {cell_id}")
         cell_wkb, centroid_wkb, representative_wkb = geometry
         if not cell_wkb or not centroid_wkb or not representative_wkb:
             raise ValueError(f"Cell {cell_id} requires three non-empty WKB geometries")
@@ -61,15 +60,12 @@ def solvable_cells_to_table(
             representative.snap_distance_m,
         )
         if any(not math.isfinite(value) for value in numeric_values):
-            raise ValueError(
-                f"Cell {cell_id} has non-finite representative measurements"
-            )
+            raise ValueError(f"Cell {cell_id} has non-finite representative measurements")
         if representative.snap_distance_m < 0 or not result.build_fingerprint:
             raise ValueError(f"Cell {cell_id} has invalid representative evidence")
         rows.append(
             {
-                "h3_id_hex": cell_id,
-                "h3_id_uint64": h3.str_to_int(cell_id),
+                "h3_id": cell_id,
                 "resolution": result.resolution,
                 "cell_geometry": cell_wkb,
                 "centroid_geometry": centroid_wkb,
@@ -103,7 +99,7 @@ def outcomes_to_table(
     if impedance not in {"distance", "time"}:
         raise ValueError("impedance must be 'distance' or 'time'")
     cell_rows = solvable_cells.to_pylist()
-    cell_by_id = {row["h3_id_hex"]: row for row in cell_rows}
+    cell_by_id = {row["h3_id"]: row for row in cell_rows}
     if len(cell_by_id) != solvable_cells.num_rows:
         raise ValueError("Solvable-cell dimension contains duplicate identifiers")
     rows_by_key: dict[LogicalKey, dict[str, object]] = {}
@@ -159,7 +155,7 @@ def outcomes_to_table(
 
 def _fact_row(
     key: LogicalKey,
-    cell_by_id: dict[str, dict[str, object]],
+    cell_by_id: dict[int, dict[str, object]],
     travel_mode: str,
     distance_m: float | None,
     time_s: float | None,
@@ -178,8 +174,8 @@ def _fact_row(
     if status == "self_pair" and (distance_m != 0.0 or time_s != 0.0 or work_item_id):
         raise ValueError("Self-pairs require zero costs and null work_item_id")
     return {
-        "origin_h3_id_hex": key[0],
-        "destination_h3_id_hex": key[1],
+        "origin_h3_id": key[0],
+        "destination_h3_id": key[1],
         "travel_mode": travel_mode,
         "network_distance_m": distance_m,
         "network_time_s": time_s,
@@ -208,23 +204,15 @@ def _validate_impedance_unit(cost_unit: str, impedance: str) -> None:
         )
 
 
-def _canonical_h3(value: str, resolution: int | None = None) -> str:
-    if not isinstance(value, str) or value != value.lower():
-        raise ValueError(
-            "H3 identifiers must be canonical lowercase hexadecimal strings"
-        )
-    try:
-        canonical = h3.int_to_str(h3.str_to_int(value))
-        actual_resolution = h3.get_resolution(canonical)
-    except (ValueError, TypeError) as exc:
-        raise ValueError(f"Invalid H3 identifier: {value}") from exc
-    if canonical != value or (
-        resolution is not None and actual_resolution != resolution
+def _canonical_h3(value: int, resolution: int | None = None) -> int:
+    canonical_h3_ids((value,))
+    if resolution is not None and (
+        type(resolution) is not int or h3.get_resolution(value) != resolution
     ):
-        raise ValueError(
-            f"H3 identifier {value} is not canonical at resolution {resolution}"
-        )
-    return canonical
+        message = f"H3 identifier {value} is not canonical at resolution {resolution}"
+        logger.error(message)
+        raise ValueError(message)
+    return value
 
 
 def _rows_to_table(rows: list[dict[str, object]], schema: pa.Schema) -> pa.Table:

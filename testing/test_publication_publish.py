@@ -21,7 +21,7 @@ def test_restart_recovers_from_each_publication_boundary_without_duplicate_facts
     temp_dir, interrupt_after
 ) -> None:
     dimension, facts = make_publication_tables()
-    first, second = "8928308280fffff", "8928308280bffff"
+    first, second = 617700169958293503, 617700169958031359
     expected = [(first, second), (first, first)]
     outcome = make_outcome(first, second)
     arguments = dict(
@@ -54,8 +54,8 @@ def test_restart_recovers_from_each_publication_boundary_without_duplicate_facts
         len(
             set(
                 zip(
-                    current.facts.column("origin_h3_id_hex").to_pylist(),
-                    current.facts.column("destination_h3_id_hex").to_pylist(),
+                    current.facts.column("origin_h3_id").to_pylist(),
+                    current.facts.column("destination_h3_id").to_pylist(),
                 )
             )
         )
@@ -67,7 +67,7 @@ def test_invalid_staged_publication_never_creates_completion_marker_or_current(
     temp_dir,
 ) -> None:
     dimension, facts = make_publication_tables()
-    origin, destination = "8928308280fffff", "8928308280bffff"
+    origin, destination = 617700169958293503, 617700169958031359
     output_root = temp_dir / "invalid-store"
 
     with pytest.raises(ValueError, match="Missing authoritative outcome"):
@@ -91,7 +91,7 @@ def test_invalid_staged_publication_never_creates_completion_marker_or_current(
 
 def test_corrupt_published_part_is_not_read_as_complete(temp_dir) -> None:
     dimension, facts = make_publication_tables()
-    origin, destination = "8928308280fffff", "8928308280bffff"
+    origin, destination = 617700169958293503, 617700169958031359
     output_root = temp_dir / "corrupt-store"
     result = publish_dataset(
         output_root,
@@ -110,6 +110,40 @@ def test_corrupt_published_part_is_not_read_as_complete(temp_dir) -> None:
 
     with pytest.raises(ValueError, match="checksum"):
         read_current_publication(output_root)
+
+
+def test_historical_schema_is_rejected_without_relabeling_or_rewriting(temp_dir) -> None:
+    dimension, facts = make_publication_tables()
+    origin, destination = 617700169958293503, 617700169958031359
+    root = temp_dir / "history"
+    result = publish_dataset(
+        root,
+        dimension,
+        facts,
+        [(origin, destination), (origin, origin)],
+        [make_outcome(origin, destination)],
+        [(origin, origin)],
+        "dataset-fingerprint",
+        "result-fingerprint",
+        "eligibility-fingerprint",
+        {"mode": "aoi_only"},
+        {"state": "complete"},
+    )
+    document = json.loads(result.manifest_path.read_text())
+    document["schema_versions"] = {
+        "dataset": "1.0.0",
+        "solvable_cells": "1.0.0",
+        "od_facts": "1.0.0",
+    }
+    result.manifest_path.write_text(json.dumps(document))
+    before = {
+        path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()
+    }
+    with pytest.raises(ValueError, match="schema versions"):
+        read_current_publication(root)
+    assert {
+        path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()
+    } == before
 
 
 def test_empty_publication_has_valid_zero_counts_and_completion(temp_dir) -> None:

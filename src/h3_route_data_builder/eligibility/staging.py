@@ -8,6 +8,8 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from .cells import canonical_h3_ids
+from .fingerprint import ELIGIBILITY_SCHEMA_VERSION
 from h3_route_data_builder.utils import get_logger
 
 logger = get_logger(__name__, level="DEBUG", add_stream_handler=False)
@@ -51,9 +53,7 @@ def stage_table_batches(
     if batch_size <= 0 or part_row_limit <= 0:
         raise ValueError("batch_size and part_row_limit must be positive")
     if b"geo" not in (table.schema.metadata or {}):
-        raise ValueError(
-            "GeoParquet schema metadata is required for staged spatial parts"
-        )
+        raise ValueError("GeoParquet schema metadata is required for staged spatial parts")
 
     output_path = Path(output_directory)
     output_path.mkdir(parents=True, exist_ok=True)
@@ -61,9 +61,7 @@ def stage_table_batches(
     for batch_index, row_offset in enumerate(range(0, table.num_rows, batch_size)):
         batch = table.slice(row_offset, batch_size)
         part_key = f"{part_prefix}-{batch_index:06d}"
-        staged_parts.extend(
-            _stage_bounded_batch(batch, output_path, part_key, part_row_limit)
-        )
+        staged_parts.extend(_stage_bounded_batch(batch, output_path, part_key, part_row_limit))
     return staged_parts
 
 
@@ -123,6 +121,7 @@ def read_verified_staged_part(staged_part: StagedPart) -> pa.Table:
             f"Staged part row count mismatch for {staged_part.part_key}: "
             f"expected {staged_part.row_count}, found {table.num_rows}"
         )
+    _validate_integer_schema(table)
     return table
 
 
@@ -156,13 +155,10 @@ def write_staged_part(
     if row_limit <= 0:
         raise ValueError("row_limit must be positive")
     if table.num_rows > row_limit:
-        raise ValueError(
-            f"Part has {table.num_rows} rows; configured limit is {row_limit}"
-        )
+        raise ValueError(f"Part has {table.num_rows} rows; configured limit is {row_limit}")
     if b"geo" not in (table.schema.metadata or {}):
-        raise ValueError(
-            "GeoParquet schema metadata is required for staged spatial parts"
-        )
+        raise ValueError("GeoParquet schema metadata is required for staged spatial parts")
+    _validate_integer_schema(table)
 
     destination = Path(output_path)
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -172,9 +168,7 @@ def write_staged_part(
         checksum = _sha256_file(temporary)
         os.replace(temporary, destination)
     except Exception as exc:
-        message = (
-            f"Failed to stage eligibility part '{part_key}' at '{destination}': {exc}"
-        )
+        message = f"Failed to stage eligibility part '{part_key}' at '{destination}': {exc}"
         logger.error(message)
         if temporary.exists():
             temporary.unlink()
@@ -201,3 +195,21 @@ def _sha256_file(path: Path) -> str:
         for chunk in iter(lambda: file_handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _validate_integer_schema(table: pa.Table) -> None:
+    """Reject legacy stages before their cells can be reused."""
+    metadata = table.schema.metadata or {}
+    if (
+        metadata.get(b"eligibility_schema_version") != ELIGIBILITY_SCHEMA_VERSION.encode()
+        or "h3_id" not in table.column_names
+        or table.schema.field("h3_id").type != pa.uint64()
+        or table.schema.field("h3_id").nullable
+        or any(name in table.column_names for name in ("h3_id_hex", "h3_id_uint64"))
+    ):
+        message = (
+            "Incompatible eligibility stage schema; choose a fresh output location and rebuild"
+        )
+        logger.error(message)
+        raise ValueError(message)
+    canonical_h3_ids(table.column("h3_id").to_pylist())
