@@ -5,14 +5,15 @@
 - **Decision**: Use ArcPy for AOI expansion, H3 polygon/AOI intersection, and geodesic
   representative-point distances in Feature 001's fixed WGS 84 / EPSG:4326 geometry contract,
   measured in meters. Do not derive or configure a projected analysis CRS. Keep pair enumeration,
-  key construction, input validation, and metrics in portable Python code.
+  key construction, input validation, and metrics in portable Python code. Do not add GeoPandas
+  or another spatial DataFrame dependency.
 - **Rationale**: Constitution Principle II reserves spatial geometry work for ArcPy and requires
   non-spatial planning to import and test without ArcPy. Feature 001 fixes processing geometry to
   WGS 84 and geodesic measurements to meters; using the same contract avoids inconsistent
   distances or an unauthorized CRS parameter.
-- **Alternatives considered**: Use H3-only cell indexing for the exact AOI test, or use a
-  third-party geometry library or derive a projected analysis CRS. These do not match Feature
-  001's chosen geometry contract.
+- **Alternatives considered**: Use H3-only cell indexing for the exact AOI test, GeoPandas or
+  another third-party geometry library, or derive a projected analysis CRS. These do not match
+  Feature 001's chosen geometry contract and the project's approved ArcPy geometry boundary.
 
 ## Decision: Expand destination scope by conservative reach plus origin offset
 

@@ -3,6 +3,15 @@
 This is an internal boundary between Feature 002 candidate planning and Feature 003 resumable OD
 solving. It does not add a public endpoint or change the shared OD fact schema.
 
+## Spatial implementation boundary
+
+- AOI intersection, geodesic representative distances, and AOI expansion use the project's ArcPy
+  geometry boundary.
+- Pair enumeration, logical-key validation, and ledger reconciliation remain non-spatial,
+  portable Python operations.
+- GeoPandas is not required, must not be added as a dependency, and must not be used in
+  implementation, tests, or tooling.
+
 ## Inputs
 
 - Build mode: AOI-only or AOI-to-surrounding.

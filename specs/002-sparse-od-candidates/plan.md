@@ -21,7 +21,8 @@ as qualifying output.
 **Language/Version**: Python 3.13 in ArcGIS Pro; project minimum Python 3.11.
 
 **Primary Dependencies**: ArcPy / Network Analyst for spatial and route operations; H3 v4 for
-canonical cell IDs; existing project utilities and pytest. No new dependency is planned.
+canonical cell IDs; existing project utilities and pytest. GeoPandas is prohibited and is not a
+dependency. No new dependency is planned.
 
 **Storage**: Candidate planning is in-memory and bounded by resolved execution limits. Durable
 work state and immutable route results remain owned by Feature 003 and live outside worker scratch
@@ -49,6 +50,8 @@ from measured geodesic separation; if absent, retain candidates without pruning.
 network cutoff to actual solved network costs in the Feature 003 handoff, never estimates.
 Candidate policy, resolved execution-limit provenance, and inference-policy version are supplied
 to Feature 003 for fingerprinting and manifest persistence; resume restores saved values.
+GeoPandas MUST NOT be used or added as a dependency. Spatial geometry operations stay in the
+ArcPy boundary; candidate enumeration and reconciliation remain portable non-spatial Python.
 
 **Scale/Scope**: Operate on Feature 001 solvable cells, respecting the existing resource-aware
 execution policy and total solvable-cell cap. Process directed origin/destination products in
@@ -81,7 +84,9 @@ and run manifest.
   conservative prefilter bound, never persisted as network cost.
 - **VII. Bounded execution**: PASS. Scope construction and candidate batches use resolved limits;
   limit overflow fails incomplete rather than silently omitting work.
-- **VIII. Interoperability**: PASS. No change to the shared OD fact schema is required.
+- **VIII. Builder Interoperability**: PASS. The feature introduces no alternate spatial stack or
+  reader requirement; it uses the ArcPy geometry boundary and portable non-spatial candidate
+  logic, without a GeoPandas dependency or use.
 - **IX. Observable operation**: PASS only with the required structured candidate logs and
   reconciliation of scope, pruning, ledger actions, solves, and cutoff outcomes; implementation
   tasks make these observable behaviors explicit.

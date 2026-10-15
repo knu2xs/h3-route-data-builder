@@ -238,6 +238,15 @@ logical pairs; verify which pairs are newly planned and which existing work is r
   cost classified against the configured cutoff; no over-cutoff result is committed or published
   as qualifying, and resume restores the same candidate policy and resolved execution limits.
 
+## Implementation Constraints
+
+- Spatial scope operations, including AOI intersection, geodesic distance measurement, and AOI
+  expansion, MUST use the project's ArcPy geometry boundary. Portable candidate enumeration and
+  reconciliation MUST remain testable without ArcPy.
+- GeoPandas MUST NOT be introduced as a dependency or used by this feature's production code,
+  tests, or tooling. This feature does not require spatial Pandas operations or a spatial
+  DataFrame dependency.
+
 ## Assumptions
 
 - Feature 001 supplies the solvable-cell set, canonical H3 polygons, and deterministic

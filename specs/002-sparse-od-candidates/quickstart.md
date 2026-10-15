@@ -8,6 +8,8 @@ candidate tests validate the typed handoff with synthetic ledger evidence and so
 
 - Use the project's ArcGIS Pro `arcgispro-py3` environment for ArcPy geometry tests.
 - Install the project development environment with `make env` when it is not already available.
+- GeoPandas is neither required nor used; geometry tests exercise ArcPy and portable candidate
+  tests exercise non-spatial Python logic.
 - Use synthetic AOI, cell, representative, and network fixtures; do not modify source data.
 - Configure a finite network cutoff with explicit units. For time cutoffs, provide a maximum
   permitted network speed or other proven conservative spatial reach.
