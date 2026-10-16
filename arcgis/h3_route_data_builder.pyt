@@ -42,8 +42,10 @@ import h3_route_data_builder
 from h3_route_data_builder.utils import get_logger
 from h3_route_data_builder.config import ConfigNode, config
 from h3_route_data_builder.eligibility.limits import recommend_execution_limits
+from h3_route_data_builder.network.review_export import export_eligibility_review_feature_class
 from h3_route_data_builder.network.workflow import run_geometry_eligibility
 
+_GEODATABASE_WORKSPACE_TYPES = {"LocalDatabase", "RemoteDatabase"}
 logger = None
 
 
@@ -164,6 +166,22 @@ class GeometryEligibilityTool:
             parameterType="Optional",
             direction="Input",
         )
+        export_review = arcpy.Parameter(
+            displayName="Also Save Hexagons as Feature Class",
+            name="export_review_feature_class",
+            datatype="GPBoolean",
+            parameterType="Optional",
+            direction="Input",
+        )
+        export_review.value = False
+        review_feature_class = arcpy.Parameter(
+            displayName="Output Hexagon Feature Class",
+            name="review_feature_class",
+            datatype="DEFeatureClass",
+            parameterType="Optional",
+            direction="Output",
+            enabled=False,
+        )
         parameters = [
             aoi,
             network,
@@ -174,6 +192,8 @@ class GeometryEligibilityTool:
             batch_size,
             part_limit,
             output_cap,
+            export_review,
+            review_feature_class,
         ]
         self._set_inferred_limit_defaults(parameters, Path.cwd())
         return parameters
@@ -196,6 +216,7 @@ class GeometryEligibilityTool:
                 self.logger.warning(f"Could not load network travel modes: {exc}")
         if parameters[2].valueAsText:
             self._set_inferred_limit_defaults(parameters, parameters[2].valueAsText)
+        parameters[10].enabled = bool(parameters[9].value)
 
     def _set_inferred_limit_defaults(
         self,
@@ -264,6 +285,34 @@ class GeometryEligibilityTool:
                 parameter.setErrorMessage("Value must be a positive integer.")
         if parameters[5].value is not None and float(parameters[5].value) < 0:
             parameters[5].setErrorMessage("Snap tolerance must be non-negative.")
+        if parameters[9].value:
+            self._validate_review_feature_class(parameters[10])
+
+    @staticmethod
+    def _validate_review_feature_class(review_feature_class: arcpy.Parameter) -> None:
+        """Require a new or overwritable feature class in a geodatabase workspace."""
+        target = review_feature_class.valueAsText
+        if not target:
+            review_feature_class.setErrorMessage(
+                "Output Hexagon Feature Class is required when Also Save Hexagons as Feature Class is checked."
+            )
+            return
+        workspace = Path(target).parent
+        try:
+            workspace_description = arcpy.Describe(str(workspace))
+            if workspace_description.dataType == "FeatureDataset":
+                workspace_description = arcpy.Describe(str(workspace.parent))
+            workspace_type = workspace_description.workspaceType
+        except Exception:
+            workspace_type = None
+        if workspace_type not in _GEODATABASE_WORKSPACE_TYPES:
+            review_feature_class.setErrorMessage(
+                "Choose a feature class in a file, mobile, or enterprise geodatabase."
+            )
+        elif arcpy.Exists(target) and not arcpy.env.overwriteOutput:
+            review_feature_class.setErrorMessage(
+                "Output Hexagon Feature Class already exists; enable overwrite or choose a new name."
+            )
 
     def execute(self, parameters: list[arcpy.Parameter], messages: Any) -> None:
         """Validate, run the eligibility workflow, and report the result location."""
@@ -277,6 +326,8 @@ class GeometryEligibilityTool:
             batch_size,
             part_limit,
             output_cap,
+            export_review,
+            review_feature_class,
         ) = parameters
         network_path = network.valueAsText
         travel_modes = arcpy.na.GetTravelModes(network_path)
@@ -316,3 +367,12 @@ class GeometryEligibilityTool:
             summary.solvable_cell_count,
             summary.run_directory,
         )
+        if export_review.value:
+            feature_count = export_eligibility_review_feature_class(
+                summary.run_directory, review_feature_class.valueAsText
+            )
+            self.logger.info(
+                "Review feature class written with %s features: %s",
+                feature_count,
+                review_feature_class.valueAsText,
+            )

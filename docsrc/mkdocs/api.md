@@ -26,3 +26,11 @@ See the [proposed shared contract](design/03-data-contract.md) for consumer adop
 ## Module `h3_route_data_builder.utils`
 
 ::: h3_route_data_builder.utils
+
+## Module `h3_route_data_builder.eligibility.review`
+
+::: h3_route_data_builder.eligibility.review
+
+## Module `h3_route_data_builder.network.review_export`
+
+::: h3_route_data_builder.network.review_export

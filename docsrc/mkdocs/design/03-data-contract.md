@@ -58,3 +58,16 @@ combined_time_s = origin_stretch_time_s + network_time_s + destination_stretch_t
 Use `sqrt(3)` as the default regular-hex center-spacing factor, label the result approximate, and do not use it as a guaranteed maximum without a conservative cell-extent allowance. Stretch time is null without an explicit speed policy.
 
 Statuses include `invalid_input`, `no_solvable_cell_within_cutoff`, `not_built`, `unreachable`, `outside_network_cutoff`, and `dataset_error`.
+
+## Review artifacts (non-contract)
+
+The builder can optionally write an eligibility review feature class of H3 hexagons for
+interactive inspection in ArcGIS Pro.
+
+- It is builder-local, optional, and never published, versioned, or fingerprinted.
+- `h3_index` holds the same exact integer identity as contract `h3_id`, stored as exact decimal
+  text because ArcGIS Big Integer fields are limited to 53 bits, too small for H3 indices. This
+  text form is a review convenience, not a contract identity; `eligibility_status` is copied
+  unchanged.
+- Consumers, including `h3-route-solver`, MUST NOT read it as contract data.
+- All contract Arrow/Parquet/JSON H3 identities remain non-null `uint64` integers.

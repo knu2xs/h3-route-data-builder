@@ -19,6 +19,7 @@ nav:
           - GeoParquet Publication: design/builder/004-geoparquet-publication.md
           - Parallel Execution: design/builder/005-parallel-execution.md
   - Configuration: configuration.md
+  - Review Export: review-export.md
   - API: api.md
   - Cookiecutter Reference: cookiecutter_reference.md
 
