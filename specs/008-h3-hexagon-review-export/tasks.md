@@ -261,7 +261,7 @@ feature class and never changes a completed run.
 - [X] T030 Run `black src testing scripts` (line length 100) and fix any style issues in the changed files.
 - [X] T031 Run the full suite with `make test` (or `pytest`) in the ArcGIS Pro conda environment. Confirm that every new test passes, ArcPy-gated tests skip cleanly outside Pro, and the existing data contract schema tests pass unchanged (SC-005).
 - [X] T032 Run `mkdocs build -f docsrc/mkdocs.yml --strict` and fix any broken links or nav errors from T025–T027.
-- [ ] T033 Do the manual ArcGIS Pro validation in `specs/008-h3-hexagon-review-export/quickstart.md`, steps 5.1–5.6. Record the results, including whether the export works in the target enterprise geodatabase if one is used, in the PR description.
+- [X] T033 Do the manual ArcGIS Pro validation in `specs/008-h3-hexagon-review-export/quickstart.md`, steps 5.1–5.6. Record the results, including whether the export works in the target enterprise geodatabase if one is used, in the PR description.
 - [X] T034 Draft a short notice to the `h3-route-solver` maintainers about the non-contract documentation addition (no schema or version change), and include it in the PR description.
 
 ---
